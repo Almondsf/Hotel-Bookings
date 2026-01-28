@@ -100,6 +100,9 @@ DATABASES = {
     }
 }
 
+# Email Configuration
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'  # For testing - prints to console
+DEFAULT_FROM_EMAIL = 'noreply@yourhotel.com'
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
