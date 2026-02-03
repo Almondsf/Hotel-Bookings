@@ -5,7 +5,7 @@ from rest_framework.exceptions import ValidationError
 from datetime import datetime, date
 from rest_framework.response import Response
 from rest_framework import status
-from .services import get_available_rooms_for_type
+from .services import get_available_rooms_for_type, generate_booking_plans
 
 class RoomTypeCreateView(generics.CreateAPIView):
     
@@ -124,3 +124,61 @@ class RoomTypeDetailView(generics.RetrieveAPIView):
     queryset = RoomType.objects.prefetch_related('amenities', 'images', 'rooms')
     serializer_class = RoomTypeDetailSerializer
     lookup_field = 'slug' 
+
+class BookingPlanView(APIView):
+    """
+    Suggests booking plans when no single room type fits all guests.
+    """
+    
+    def get(self, request):
+        # Get and validate query params (same as search view)
+        check_in_str = request.query_params.get('check_in')
+        check_out_str = request.query_params.get('check_out')
+        adults_str = request.query_params.get('adults')
+        children_str = request.query_params.get('children', '0')
+        
+        if not check_in_str or not check_out_str or not adults_str:
+            raise ValidationError({
+                "error": "check_in, check_out, and adults are required"
+            })
+        
+        try:
+            check_in = datetime.strptime(check_in_str, '%Y-%m-%d').date()
+            check_out = datetime.strptime(check_out_str, '%Y-%m-%d').date()
+            adults = int(adults_str)
+            children = int(children_str)
+        except ValueError:
+            raise ValidationError({"error": "Invalid parameters"})
+        
+        # Generate plans
+        plans = generate_booking_plans(check_in, check_out, adults, children)
+        
+        # Format response
+        formatted_plans = {
+            'budget_friendly': self._format_plans(plans['budget_friendly']),
+            'convenience': self._format_plans(plans['convenience'])
+        }
+        
+        return Response(formatted_plans, status=status.HTTP_200_OK)
+    
+    def _format_plans(self, plans):
+        """Format plans for JSON response"""
+        formatted = []
+        for plan in plans:
+            rooms_list = []
+            for room_type, count in plan['rooms'].items():
+                rooms_list.append({
+                    'room_type_id': room_type.id,
+                    'room_type_name': room_type.name,
+                    'count': count,
+                    'capacity': f"{room_type.max_adults} adults, {room_type.max_children} children"
+                })
+            
+            formatted.append({
+                'rooms': rooms_list,
+                'total_rooms': plan['total_rooms'],
+                'total_price': str(plan['total_price']),
+                'price_per_night': str(plan['price_per_night'])
+            })
+        
+        return formatted
