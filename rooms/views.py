@@ -6,6 +6,7 @@ from datetime import datetime, date
 from rest_framework.response import Response
 from rest_framework import status
 from .services import get_available_rooms_for_type, generate_booking_plans
+from rest_framework.views import APIView
 
 class RoomTypeCreateView(generics.CreateAPIView):
     
@@ -117,49 +118,45 @@ class RoomTypeSearchView(generics.ListAPIView):
             except ValueError:
                 pass
         
-        return contex
-
-
-class RoomTypeDetailView(generics.RetrieveAPIView):
-    queryset = RoomType.objects.prefetch_related('amenities', 'images', 'rooms')
-    serializer_class = RoomTypeDetailSerializer
-    lookup_field = 'slug' 
-
-class BookingPlanView(APIView):
-    """
-    Suggests booking plans when no single room type fits all guests.
-    """
+        return context
     
-    def get(self, request):
-        # Get and validate query params (same as search view)
+    def list(self, request, *args, **kwargs):
+        """Override to add booking plans when no single room fits"""
+        # Get normal search results
+        queryset = self.get_queryset()
+        
+        # Get query params
+        adults = int(request.query_params.get('adults', 0))
+        children = int(request.query_params.get('children', 0))
         check_in_str = request.query_params.get('check_in')
         check_out_str = request.query_params.get('check_out')
-        adults_str = request.query_params.get('adults')
-        children_str = request.query_params.get('children', '0')
         
-        if not check_in_str or not check_out_str or not adults_str:
-            raise ValidationError({
-                "error": "check_in, check_out, and adults are required"
-            })
+        # Serialize normal results
+        serializer = self.get_serializer(queryset, many=True)
         
-        try:
-            check_in = datetime.strptime(check_in_str, '%Y-%m-%d').date()
-            check_out = datetime.strptime(check_out_str, '%Y-%m-%d').date()
-            adults = int(adults_str)
-            children = int(children_str)
-        except ValueError:
-            raise ValidationError({"error": "Invalid parameters"})
-        
-        # Generate plans
-        plans = generate_booking_plans(check_in, check_out, adults, children)
-        
-        # Format response
-        formatted_plans = {
-            'budget_friendly': self._format_plans(plans['budget_friendly']),
-            'convenience': self._format_plans(plans['convenience'])
+        # Build response
+        response_data = {
+            'room_types': serializer.data,
+            'booking_plans': None
         }
         
-        return Response(formatted_plans, status=status.HTTP_200_OK)
+        # Check if any single room can fit everyone
+        can_fit_in_one = queryset.exists()
+        
+        # If no single room fits, generate booking plans
+        if not can_fit_in_one:
+            check_in = datetime.strptime(check_in_str, '%Y-%m-%d').date()
+            check_out = datetime.strptime(check_out_str, '%Y-%m-%d').date()
+            
+            plans = generate_booking_plans(check_in, check_out, adults, children)
+            
+            # Format plans for response
+            response_data['booking_plans'] = {
+                'budget_friendly': self._format_plans(plans['budget_friendly']),
+                'convenience': self._format_plans(plans['convenience'])
+            }
+        
+        return Response(response_data)
     
     def _format_plans(self, plans):
         """Format plans for JSON response"""
@@ -170,6 +167,7 @@ class BookingPlanView(APIView):
                 rooms_list.append({
                     'room_type_id': room_type.id,
                     'room_type_name': room_type.name,
+                    'room_type_slug': room_type.slug,
                     'count': count,
                     'capacity': f"{room_type.max_adults} adults, {room_type.max_children} children"
                 })
@@ -182,3 +180,8 @@ class BookingPlanView(APIView):
             })
         
         return formatted
+
+class RoomTypeDetailView(generics.RetrieveAPIView):
+    queryset = RoomType.objects.prefetch_related('amenities', 'images', 'rooms')
+    serializer_class = RoomTypeDetailSerializer
+    lookup_field = 'slug' 
