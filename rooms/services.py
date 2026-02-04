@@ -1,6 +1,6 @@
 from datetime import date, timedelta
 from decimal import Decimal
-from rooms.models import Room, RoomAvailabilityOverride
+from rooms.models import Room, RoomAvailabilityOverride, RoomType
 from booking.models import Booking
 from collections import Counter
 from decimal import Decimal
