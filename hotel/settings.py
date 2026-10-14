@@ -10,22 +10,50 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import base64
+import hashlib
+import sys
+from datetime import timedelta
 from pathlib import Path
+
+import environ
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+env = environ.Env(
+    DJANGO_DEBUG=(bool, False),
+    DJANGO_ALLOWED_HOSTS=(list, []),
+)
+environ.Env.read_env(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-5!o^6ief(t99(uf%118u==d$@_hd%h(q1e9c)n7(r4-p$+w_ib'
+SECRET_KEY = env('DJANGO_SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = env('DJANGO_DEBUG')
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = env('DJANGO_ALLOWED_HOSTS')
+
+TESTING = 'test' in sys.argv
+
+# The web app (staff portal and guest site), used to build links in emails and redirects
+FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:3000').rstrip('/')
+
+# Keys for encrypted model fields (guest ID numbers). Comma-separated Fernet
+# keys; the first encrypts, all decrypt (for rotation). Generate one with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+FIELD_ENCRYPTION_KEYS = env.list('FIELD_ENCRYPTION_KEYS', default=[])
+if not FIELD_ENCRYPTION_KEYS:
+    if not (DEBUG or TESTING):
+        raise ImproperlyConfigured("FIELD_ENCRYPTION_KEYS must be set in production.")
+    # Development only: derive a stable key from SECRET_KEY
+    FIELD_ENCRYPTION_KEYS = [base64.urlsafe_b64encode(hashlib.sha256(f'fields:{SECRET_KEY}'.encode()).digest()).decode()]
 
 
 # Application definition
@@ -37,15 +65,34 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'corsheaders',
+    'drf_spectacular',
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
+    'audit',
     'authentication',
     'rooms',
     'booking',
+    'billing',
+    'payments',
+    'rates',
+    'housekeeping',
+    'maintenance',
+    'nightaudit',
+    'pos',
+    'jobs',
+    'notifications',
+    'distribution',
+    'locks',
+    'privacy',
 ]
 
 MIDDLEWARE = [
+    'hotel.observability.RequestIdMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'django.middleware.csp.ContentSecurityPolicyMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -73,36 +120,113 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'hotel.wsgi.application'
 
-#Authentication classes
 REST_FRAMEWORK = {
+    # Session auth only for the browsable API in development; the real API is
+    # token-only, which also keeps it out of reach of CSRF.
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
-    )
+        ('rest_framework_simplejwt.authentication.JWTAuthentication',
+         'rest_framework.authentication.SessionAuthentication')
+        if DEBUG else ('rest_framework_simplejwt.authentication.JWTAuthentication',)
+    ),
+    # Secure by default: public endpoints must opt in with AllowAny.
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
+    # The browsable API is a dev convenience; production serves JSON only.
+    'DEFAULT_RENDERER_CLASSES': (
+        ('rest_framework.renderers.JSONRenderer', 'rest_framework.renderers.BrowsableAPIRenderer')
+        if DEBUG else ('rest_framework.renderers.JSONRenderer',)
+    ),
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': env('THROTTLE_ANON', default='120/min'),
+        'user': env('THROTTLE_USER', default='600/min'),
+        # Brute-forcing confirmation numbers / spamming room holds
+        'booking_lookup': env('THROTTLE_BOOKING_LOOKUP', default='10/min'),
+        'booking_create': env('THROTTLE_BOOKING_CREATE', default='20/hour'),
+        'login_ip': env('THROTTLE_LOGIN_IP', default='10/min'),
+        'login_email': env('THROTTLE_LOGIN_EMAIL', default='10/hour'),
+        'password_reset_email': env('THROTTLE_PASSWORD_RESET_EMAIL', default='3/hour'),
+        'payment_verify': env('THROTTLE_PAYMENT_VERIFY', default='30/min'),
+    },
+    # Number of reverse proxies in front of the app (e.g. 1 for nginx). Used
+    # to read the real client IP for throttling and audit logs; 0 means
+    # X-Forwarded-For is ignored because clients could forge it.
+    'NUM_PROXIES': env.int('NUM_PROXIES', default=0),
+    'EXCEPTION_HANDLER': 'hotel.errors.exception_handler',
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 50,
 }
 
-from datetime import timedelta
+# Bounds on public search/booking input so a single request can't trigger
+# unbounded work.
+MAX_STAY_NIGHTS = env.int('MAX_STAY_NIGHTS', default=90)
+MAX_GUESTS_PER_SEARCH = env.int('MAX_GUESTS_PER_SEARCH', default=50)
+
+# Online payments. Keys come from each provider's dashboard; use test keys
+# outside production. Webhook URLs to register with the providers:
+#   https://<api-host>/api/payments/webhooks/paystack/
+#   https://<api-host>/api/payments/webhooks/flutterwave/
+PAYMENT_GATEWAYS = env.list('PAYMENT_GATEWAYS', default=['PAYSTACK', 'FLUTTERWAVE'])
+PAYSTACK_SECRET_KEY = env('PAYSTACK_SECRET_KEY', default='')
+FLUTTERWAVE_SECRET_KEY = env('FLUTTERWAVE_SECRET_KEY', default='')
+FLUTTERWAVE_WEBHOOK_HASH = env('FLUTTERWAVE_WEBHOOK_HASH', default='')
+# Where the gateway sends the guest back after paying (fixed server-side, so
+# it can't be abused as an open redirect)
+PAYMENT_CALLBACK_URL = env('PAYMENT_CALLBACK_URL', default=f'{FRONTEND_URL}/booking/payment-complete')
+
+# Hotel identity, printed on invoices
+HOTEL_NAME = env('HOTEL_NAME', default='Grand Hotel')
+HOTEL_ADDRESS = env('HOTEL_ADDRESS', default='')
+HOTEL_PHONE = env('HOTEL_PHONE', default='')
+HOTEL_EMAIL = env('HOTEL_EMAIL', default='')
+HOTEL_TAX_ID = env('HOTEL_TAX_ID', default='', )  # FIRS TIN
+HOTEL_CURRENCY = env('HOTEL_CURRENCY', default='NGN')
+INVOICE_PREFIX = env('INVOICE_PREFIX', default='INV')
+
+# Hotel policies
+HOTEL_CHECK_IN_TIME = env('HOTEL_CHECK_IN_TIME', default='14:00')
+HOTEL_CHECK_OUT_TIME = env('HOTEL_CHECK_OUT_TIME', default='12:00')
+# How long an unpaid online booking holds its room
+BOOKING_HOLD_MINUTES = env.int('BOOKING_HOLD_MINUTES', default=15)
+# Free cancellation until this many hours before check-in time...
+FREE_CANCELLATION_HOURS = env.int('FREE_CANCELLATION_HOURS', default=48)
+# ...after which (and for no-shows) this many nights are charged
+CANCELLATION_PENALTY_NIGHTS = env.int('CANCELLATION_PENALTY_NIGHTS', default=1)
+# Check-out is refused while the folio has a balance (unless billed to a company)
+CHECKOUT_REQUIRES_SETTLED_FOLIO = env.bool('CHECKOUT_REQUIRES_SETTLED_FOLIO', default=True)
+# Check-in only into rooms housekeeping has cleaned (and, if set, a supervisor inspected)
+REQUIRE_CLEAN_ROOM_AT_CHECK_IN = env.bool('REQUIRE_CLEAN_ROOM_AT_CHECK_IN', default=True)
+REQUIRE_ROOM_INSPECTION = env.bool('REQUIRE_ROOM_INSPECTION', default=False)
+# Nigerian hotels record guest ID at arrival; check-in is refused without one
+REQUIRE_GUEST_ID_AT_CHECK_IN = env.bool('REQUIRE_GUEST_ID_AT_CHECK_IN', default=True)
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=5),  # Token expires after 5 hours
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),  # Refresh token expires after 1 day
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=env.int('JWT_ACCESS_MINUTES', default=15)),
+    # Roughly one shift; rotation means an active session keeps extending itself.
+    'REFRESH_TOKEN_LIFETIME': timedelta(hours=env.int('JWT_REFRESH_HOURS', default=12)),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
+    'UPDATE_LAST_LOGIN': True,
 }
+
+PASSWORD_RESET_TIMEOUT = env.int('PASSWORD_RESET_TIMEOUT', default=60 * 60 * 24)
 
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': env.db('DATABASE_URL', default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}"),
 }
 
 # Email Configuration
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'  # For testing - prints to console
-DEFAULT_FROM_EMAIL = 'noreply@yourhotel.com'
+EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
+DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='noreply@yourhotel.com')
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
@@ -128,7 +252,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = env('TIME_ZONE', default='Africa/Lagos')
 
 USE_I18N = True
 
@@ -139,5 +263,118 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 AUTH_USER_MODEL = 'authentication.User'
+
+# Strong hashing is deliberately slow; the test suite doesn't need it.
+if TESTING:
+    PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
+
+ADMIN_URL = env('DJANGO_ADMIN_URL', default='admin/')
+
+# Two-factor sign-in. Roles listed must enrol; with ENFORCE_MFA they can do
+# nothing else until they have. Turn enforcement on once those staff have enrolled.
+MFA_REQUIRED_ROLES = env.list('MFA_REQUIRED_ROLES', default=['admin', 'manager', 'accountant'])
+ENFORCE_MFA = env.bool('ENFORCE_MFA', default=False)
+MFA_ISSUER = env('MFA_ISSUER', default=env('HOTEL_NAME', default='Hotel PMS'))
+
+# Only needed when the web app is served from a different origin than the API
+CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[])
+CORS_ALLOW_CREDENTIALS = True  # the refresh cookie
+CORS_ALLOW_HEADERS = ['accept', 'authorization', 'content-type', 'x-auth-mode']
+
+# Production hardening. Behind a TLS-terminating proxy (nginx, load balancer)
+# that sets X-Forwarded-Proto.
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = env.bool('DJANGO_SECURE_SSL_REDIRECT', default=True)
+    SECURE_HSTS_SECONDS = env.int('DJANGO_SECURE_HSTS_SECONDS', default=60 * 60 * 24 * 365)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    CSRF_TRUSTED_ORIGINS = env.list('DJANGO_CSRF_TRUSTED_ORIGINS', default=[])
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_REFERRER_POLICY = 'same-origin'
+    X_FRAME_OPTIONS = 'DENY'
+
+# Background jobs (Django's task framework). Run `manage.py run_worker` in
+# production. Development and tests run jobs inline unless TASK_BACKEND=database.
+TASK_BACKEND = env('TASK_BACKEND', default='immediate' if (DEBUG or TESTING) else 'database')
+TASKS = {
+    'default': {
+        'BACKEND': ('django.tasks.backends.immediate.ImmediateBackend' if TASK_BACKEND == 'immediate'
+                    else 'jobs.backend.DatabaseBackend'),
+    },
+}
+PERIODIC_JOBS = {
+    'expire-payment-holds': (timedelta(minutes=1), 'notifications.services.expire_payment_holds'),
+    'pre-arrival-reminders': (timedelta(hours=1), 'notifications.services.send_pre_arrival_reminders'),
+    'housekeeping-task-list': (timedelta(hours=1), 'notifications.services.generate_housekeeping_tasks'),
+    # Channel manager: webhooks bring bookings in immediately; these are the safety nets
+    'channel-pull-bookings': (timedelta(minutes=2), 'distribution.services.pull_bookings'),
+    'channel-full-sync': (timedelta(hours=6), 'distribution.services.push_ari'),
+    'privacy-retention': (timedelta(days=1), 'privacy.services.retention_job'),
+}
+
+# NDPA storage limitation. Guests who haven't stayed for this long are anonymised
+# (invoices are kept for tax law, without the person's details).
+GUEST_RETENTION_DAYS = env.int('GUEST_RETENTION_DAYS', default=6 * 365)
+# Copies of ID documents are deleted this long after capture
+GUEST_ID_RETENTION_DAYS = env.int('GUEST_ID_RETENTION_DAYS', default=365)
+# Door locks: 'none' keeps a key register only; 'bridge' talks to the on-premise lock server
+LOCK_SYSTEM = env('LOCK_SYSTEM', default='none')
+LOCK_BRIDGE_URL = env('LOCK_BRIDGE_URL', default='')
+LOCK_BRIDGE_SECRET = env('LOCK_BRIDGE_SECRET', default='')
+CHANNEX_BASE_URL = env('CHANNEX_BASE_URL', default='https://staging.channex.io/api/v1')
+
+# Guest messaging. SMS / WhatsApp via Termii (https://termii.com).
+SMS_ENABLED = env.bool('SMS_ENABLED', default=False)
+WHATSAPP_ENABLED = env.bool('WHATSAPP_ENABLED', default=False)
+TERMII_API_KEY = env('TERMII_API_KEY', default='')
+TERMII_SENDER_ID = env('TERMII_SENDER_ID', default='')
+TERMII_BASE_URL = env('TERMII_BASE_URL', default='https://api.ng.termii.com')
+DEFAULT_PHONE_COUNTRY_CODE = env('DEFAULT_PHONE_COUNTRY_CODE', default='234')
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Hotel PMS API',
+    'DESCRIPTION': 'Reservations, front desk, billing, payments, operations and reporting.',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    # Plain APIViews without serializers are left out of the docs; don't let that
+    # noise hide real findings in `check --deploy`
+    'DISABLE_ERRORS_AND_WARNINGS': True,
+}
+SILENCED_SYSTEM_CHECKS = ['drf_spectacular.W001', 'drf_spectacular.W002']
+
+# Content Security Policy for pages Django renders (admin, API docs). The web
+# app's own policy is set by nginx (see deploy/nginx.conf).
+from django.utils.csp import CSP  # noqa: E402
+
+SECURE_CSP = {
+    'default-src': [CSP.SELF],
+    'script-src': [CSP.SELF, CSP.NONCE, 'https://cdn.jsdelivr.net'],
+    'style-src': [CSP.SELF, CSP.UNSAFE_INLINE, 'https://cdn.jsdelivr.net'],
+    'img-src': [CSP.SELF, 'data:', 'https:'],
+    'frame-ancestors': [CSP.NONE],
+    'base-uri': [CSP.SELF],
+    'form-action': [CSP.SELF],
+}
+
+LOG_FORMAT = env('LOG_FORMAT', default='text' if DEBUG else 'json')
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {'request_id': {'()': 'hotel.observability.RequestIdFilter'}},
+    'formatters': {
+        'json': {'()': 'hotel.observability.JsonFormatter'},
+        'text': {'format': '%(asctime)s %(levelname)s [%(request_id)s] %(name)s: %(message)s'},
+    },
+    'handlers': {'console': {'class': 'logging.StreamHandler', 'formatter': LOG_FORMAT, 'filters': ['request_id']}},
+    'root': {'handlers': ['console'], 'level': env('LOG_LEVEL', default='INFO')},
+    'loggers': {
+        # Every task state change is logged at INFO; only problems are worth seeing
+        'django.tasks': {'level': 'WARNING'},
+    },
+}

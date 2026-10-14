@@ -1,30 +1,34 @@
-"""
-URL configuration for hotel project.
-
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/6.0/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
-"""
+from django.conf import settings
 from django.contrib import admin
 from django.urls import path, include
-from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
-    TokenRefreshView,
-)
+
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from rest_framework.permissions import IsAdminUser
+
+from .views import HealthView, HotelInfoView
 
 urlpatterns = [
-    path('admin/', admin.site.urls),
-    # path('api/', include('authentication.urls')),
+    path(settings.ADMIN_URL, admin.site.urls),
+    path('api/health/', HealthView.as_view(), name='health'),
+    path('api/hotel/', HotelInfoView.as_view(), name='hotel-info'),
+    # API reference for integrators: Django-admin staff only, so the attack surface isn't advertised
+    path('api/schema/', SpectacularAPIView.as_view(permission_classes=[IsAdminUser]), name='api-schema'),
+    path('api/docs/', SpectacularSwaggerView.as_view(url_name='api-schema', permission_classes=[IsAdminUser]),
+         name='api-docs'),
+    path('api/', include('authentication.urls')),
+    path('api/audit/', include('audit.urls')),
+    path('api/billing/', include('billing.urls')),
+    path('api/payments/', include('payments.urls')),
+    path('api/rates/', include('rates.urls')),
+    path('api/housekeeping/', include('housekeeping.urls')),
+    path('api/maintenance/', include('maintenance.urls')),
+    path('api/', include('nightaudit.urls')),
+    path('api/pos/', include('pos.urls')),
+    path('api/distribution/', include('distribution.urls')),
+    path('api/locks/', include('locks.urls')),
+    path('api/privacy/', include('privacy.urls')),
     path('api/bookings/', include('booking.urls')),
+    path('api/', include('booking.staff_urls')),
     path('api/rooms/', include('rooms.urls')),
     
 ]

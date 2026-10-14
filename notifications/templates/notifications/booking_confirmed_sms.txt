@@ -1,0 +1,1 @@
+{% autoescape off %}{{ hotel_name }}: booking {{ booking.confirmation_number }} confirmed for {{ booking.check_in_date|date:'j M' }}-{{ booking.check_out_date|date:'j M' }}. Bring a valid ID at check-in.{% endautoescape %}
