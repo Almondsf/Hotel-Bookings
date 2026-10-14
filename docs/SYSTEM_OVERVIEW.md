@@ -416,6 +416,7 @@ frontend/src/
 ## 15. Conventions
 
 - **Business rules go in services**, called from views. Services take model instances and keyword arguments, run in `transaction.atomic()`, lock rows they change (`select_for_update`), and raise `DomainError` / `ConflictError` / `ForbiddenError` with a message a user can read.
+- **Lock only the row you change.** When a locked query also joins related tables, write `select_for_update(of=('self',))`. PostgreSQL refuses to lock across an optional (nullable) join, and locking the related rows makes unrelated actions wait. SQLite ignores locks entirely, so this class of bug only shows up on PostgreSQL: run the tests against PostgreSQL before relying on a new lock.
 - **Every sensitive action is audited** with `audit.services.record(action, request=…, target=…, changes=…)`. Adding an action means adding it to `AuditLog.Action` and a migration.
 - **Use the business date** (`hotel.clock.business_date()`), not the calendar date, for anything about the hotel's "today".
 - **Money:** `Decimal` everywhere, rounded with `hotel.money.money()` (half-up, 2 places). Never floats.
@@ -447,7 +448,12 @@ cd frontend && npm install && npm run dev         # http://localhost:3000
 | `python manage.py run_worker` | Background job worker (production) |
 | `python manage.py expire_holds`, `apply_retention` | One-off runs of those jobs |
 
-CI runs the backend and frontend checks on every push.
+CI (`.github/workflows/ci.yml`) runs on every push and pull request, on a clean checkout with **no `.env`**:
+
+- **Backend:** checks there are no missing migrations, runs the test suite in parallel against **PostgreSQL 16**, then runs Django's production security audit (`check --deploy`) with `DEBUG` off.
+- **Frontend:** `npm ci`, TypeScript check, tests and a production build.
+
+Because CI has no `.env`, settings use their defaults there: `DEBUG` is off, so tests run with production hardening (only the HTTPS redirect is skipped under test, as the test client uses plain HTTP), and payment gateways get placeholder keys. If something passes locally but fails in CI, check that every needed file is committed: the Python `.gitignore` template ignores folders named `lib/`, so `frontend/src/lib/` is explicitly re-included.
 
 ## 17. Known gaps
 
