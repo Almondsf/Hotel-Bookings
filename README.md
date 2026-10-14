@@ -19,7 +19,7 @@ A property management system for a full-service hotel, built for Nigerian operat
 ## Architecture
 
 - **API:** Django 6 + Django REST Framework (`/api/...`), PostgreSQL in production.
-- **Web app:** React + TypeScript (Vite) in `frontend/`: the staff portal (`/`) and the guest booking site (`/book`).
+- **Web app:** React + TypeScript (Vite) in `frontend/`: the public website (`/`), the guest booking engine (`/book`) and the staff portal (`/login`, then `/dashboard`).
 - **Background jobs:** Django's task framework with a database-backed queue (`jobs` app); run `python manage.py run_worker`.
 - One Django app per domain: `booking`, `billing`, `payments`, `rates`, `rooms`, `housekeeping`, `maintenance`, `pos`, `nightaudit`, `notifications`, `distribution`, `locks`, `privacy`, `audit`, `authentication`, `jobs`. Business rules live in each app's `services.py` / `lifecycle.py`, not in views.
 
@@ -36,9 +36,14 @@ python manage.py runserver
 cd frontend && npm install && npm run dev        # http://localhost:3000 (proxies /api to :8000)
 ```
 
-Demo staff accounts are printed by `seed_demo`. The guest site is at http://localhost:3000/book.
+Demo staff accounts are printed by `seed_demo` (password `DemoPass#2026`). The public site is at http://localhost:3000/ and the staff portal at http://localhost:3000/login.
 
 Tests: `python manage.py test` (backend), `npm test` and `npm run typecheck` (frontend). CI runs both on every push (`.github/workflows/ci.yml`).
+
+## Documentation
+
+- [docs/SYSTEM_OVERVIEW.md](docs/SYSTEM_OVERVIEW.md): what the system does and how it's built (features, architecture, data model, key flows, roles, API, jobs, integrations, configuration). Start here if you're new.
+- [docs/USER_STORIES.md](docs/USER_STORIES.md): what each kind of user needs to do, with acceptance criteria.
 
 ## Production
 
