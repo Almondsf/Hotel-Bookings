@@ -1,20 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState, type FormEvent } from 'react';
+import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
 import { api, post } from '../api/client';
 import type { Reservation, Room } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { CheckInDialog, CheckOutDialog, EditStayDialog } from '../components/frontDesk';
 import { ErrorAlert, Field, Loading, Modal, PageHeader, StatusBadge } from '../components/ui';
 import { formatDate, formatDateTime, formatMoney, humanize } from '../lib/format';
 
-type Dialog = 'check-in' | 'check-out' | 'cancel' | 'no-show' | 'move-room' | null;
-
-const ID_TYPES = [
-  ['PASSPORT', 'International Passport'], ['NATIONAL_ID', 'National ID (NIN)'],
-  ['DRIVERS_LICENCE', "Driver's Licence"], ['VOTERS_CARD', "Voter's Card"],
-  ['RESIDENCE_PERMIT', 'Residence Permit'], ['OTHER', 'Other'],
-];
+type Dialog = 'check-in' | 'check-out' | 'cancel' | 'no-show' | 'move-room' | 'edit' | null;
 
 export function ReservationDetail() {
   const { id } = useParams();
@@ -49,7 +44,10 @@ export function ReservationDetail() {
             <button onClick={() => act.mutate({ action: 'post-room-charges' })}>Update bill</button>
             <button className="primary" onClick={() => setDialog('check-out')}>Check out</button>
           </>}
-          {['PENDING', 'CONFIRMED', 'CHECKED_IN'].includes(r.status) && <button onClick={() => setDialog('move-room')}>Move room</button>}
+          {['PENDING', 'CONFIRMED', 'CHECKED_IN'].includes(r.status) && <>
+            <button onClick={() => setDialog('edit')}>Change</button>
+            <button onClick={() => setDialog('move-room')}>Move room</button>
+          </>}
           {r.status === 'CONFIRMED' && <button onClick={() => setDialog('no-show')}>No-show</button>}
           {['PENDING', 'CONFIRMED'].includes(r.status) && <button className="danger" onClick={() => setDialog('cancel')}>Cancel</button>}
         </>}
@@ -97,10 +95,9 @@ export function ReservationDetail() {
         <div className="card muted">Booked {formatDateTime(r.created_at)}</div>
       </div>
 
-      {dialog === 'check-in' && <CheckInDialog reservation={r} busy={act.isPending} error={act.error}
-                                               onClose={() => setDialog(null)} onSubmit={(body) => act.mutate({ action: 'check-in', body })} />}
-      {dialog === 'check-out' && <CheckOutDialog reservation={r} busy={act.isPending} error={act.error}
-                                                 onClose={() => setDialog(null)} onSubmit={(body) => act.mutate({ action: 'check-out', body })} />}
+      {dialog === 'check-in' && <CheckInDialog reservation={r} onClose={() => setDialog(null)} />}
+      {dialog === 'check-out' && <CheckOutDialog reservation={r} onClose={() => setDialog(null)} />}
+      {dialog === 'edit' && <EditStayDialog reservation={r} onClose={() => setDialog(null)} />}
       {(dialog === 'cancel' || dialog === 'no-show') && (
         <PenaltyDialog reservation={r} action={dialog} canWaive={can('folios.adjust') || can('bookings.manage')}
                        busy={act.isPending} error={act.error} onClose={() => setDialog(null)}
@@ -142,81 +139,6 @@ interface DialogProps {
   error: unknown;
   onClose: () => void;
   onSubmit: (body: unknown) => void;
-}
-
-function CheckInDialog({ reservation, busy, error, onClose, onSubmit }: DialogProps) {
-  const needsId = !reservation.guest.has_valid_identification;
-  const [doc, setDoc] = useState({ document_type: 'NATIONAL_ID', document_number: '', issuing_country: 'Nigeria', expiry_date: '' });
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    onSubmit(needsId || doc.document_number
-      ? { identification: { ...doc, expiry_date: doc.expiry_date || null } }
-      : {});
-  }
-  return (
-    <Modal title={`Check in ${reservation.guest.first_name}`} onClose={onClose}>
-      <form onSubmit={submit} className="stack">
-        <ErrorAlert error={error} />
-        <p className="muted" style={{ margin: 0 }}>Room {reservation.room_number} until {formatDate(reservation.check_out_date)}.</p>
-        {needsId ? <strong>Record the guest's ID document</strong> : <span className="muted">A valid ID is on file. You can add another.</span>}
-        <div className="form-grid">
-          <Field label="Document type">
-            <select value={doc.document_type} onChange={(e) => setDoc({ ...doc, document_type: e.target.value })}>
-              {ID_TYPES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </Field>
-          <Field label="Document number" hint="Stored encrypted">
-            <input required={needsId} value={doc.document_number} autoComplete="off"
-                   onChange={(e) => setDoc({ ...doc, document_number: e.target.value })} />
-          </Field>
-          <Field label="Issuing country">
-            <input value={doc.issuing_country} onChange={(e) => setDoc({ ...doc, issuing_country: e.target.value })} />
-          </Field>
-          <Field label="Expiry date">
-            <input type="date" value={doc.expiry_date} onChange={(e) => setDoc({ ...doc, expiry_date: e.target.value })} />
-          </Field>
-        </div>
-        <div className="actions">
-          <button type="button" onClick={onClose}>Cancel</button>
-          <button className="primary" disabled={busy}>Check in</button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-function CheckOutDialog({ reservation, busy, error, onClose, onSubmit }: DialogProps) {
-  const accounts = useQuery({
-    queryKey: ['accounts'],
-    queryFn: () => api<{ results: { id: number; name: string }[] }>('billing/accounts/'),
-  });
-  const [account, setAccount] = useState('');
-  const balance = Number(reservation.folio?.balance ?? 0);
-  return (
-    <Modal title="Check out" onClose={onClose}>
-      <div className="stack">
-        <ErrorAlert error={error} />
-        <p style={{ margin: 0 }}>Folio balance: <strong>{formatMoney(reservation.folio?.balance ?? 0)}</strong>
-          {' '}<span className="muted">(use "Update bill" first to post tonight's room charge)</span></p>
-        {balance > 0 && (
-          <>
-            <p className="muted" style={{ margin: 0 }}>
-              Take payment on the <Link to={`/folios/${reservation.folio?.id}`}>folio</Link>, or bill it to a company:
-            </p>
-            <select value={account} onChange={(e) => setAccount(e.target.value)} aria-label="Company account">
-              <option value="">— Guest pays —</option>
-              {accounts.data?.results.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
-          </>
-        )}
-        <div className="actions">
-          <button type="button" onClick={onClose}>Cancel</button>
-          <button className="primary" disabled={busy}
-                  onClick={() => onSubmit(account ? { transfer_to_account: Number(account) } : {})}>Check out</button>
-        </div>
-      </div>
-    </Modal>
-  );
 }
 
 function PenaltyDialog({ reservation, action, canWaive, busy, error, onClose, onSubmit }:

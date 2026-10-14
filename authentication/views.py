@@ -153,7 +153,8 @@ class RefreshView(GenericAPIView):
     authentication_classes = []
     serializer_class = TokenRefreshSerializer
     throttle_classes = [LoginIPThrottle]
-    login_ip_throttle_scope = 'login_ip'
+    # Not the login budget: page reloads refresh, and sharing it locked staff out after a few clicks
+    login_ip_throttle_scope = 'token_refresh'
 
     def post(self, request):
         from_cookie = 'refresh' not in request.data

@@ -150,6 +150,9 @@ REST_FRAMEWORK = {
         'booking_create': env('THROTTLE_BOOKING_CREATE', default='20/hour'),
         'login_ip': env('THROTTLE_LOGIN_IP', default='10/min'),
         'login_email': env('THROTTLE_LOGIN_EMAIL', default='10/hour'),
+        # Every page load restores the session through a refresh, and a hotel's desk PCs usually share one
+        # public IP. Refresh tokens are signed and unguessable, so this only guards against floods.
+        'token_refresh': env('THROTTLE_TOKEN_REFRESH', default='300/min'),
         'password_reset_email': env('THROTTLE_PASSWORD_RESET_EMAIL', default='3/hour'),
         'payment_verify': env('THROTTLE_PAYMENT_VERIFY', default='30/min'),
     },

@@ -43,6 +43,10 @@ export function Pos() {
     queryKey: ['pos-order', orderId], queryFn: () => api<Order>(`pos/orders/${orderId}/`), enabled: !!orderId,
   });
 
+  const current = order.data;
+  const sections = new Map<string, Product[]>();
+  for (const p of products.data ?? []) sections.set(p.section || 'Menu', [...(sections.get(p.section || 'Menu') ?? []), p]);
+
   const refresh = (data?: Order) => {
     if (data) queryClient.setQueryData(['pos-order', data.id], data);
     void queryClient.invalidateQueries({ queryKey: ['pos-orders'] });
@@ -61,17 +65,24 @@ export function Pos() {
     },
   });
 
-  async function newOrder() {
+  async function startOrder() {
     const created = await post<Order>('pos/orders/', { outlet: outletId, table_label: table });
     setTable('');
     setNotice('');
     setOrderId(created.id);
     refresh(created);
+    return created;
   }
+  const newOrder = useMutation({ mutationFn: startOrder });
+  // Tapping an item with no order open starts one, as a waiter would expect
+  const addItem = useMutation({
+    mutationFn: async (product: Product) => {
+      const target = current ?? await startOrder();
+      return post<Order>(`pos/orders/${target.id}/items/`, { product: product.id, quantity: 1 });
+    },
+    onSuccess: (data) => refresh(data),
+  });
 
-  const sections = new Map<string, Product[]>();
-  for (const p of products.data ?? []) sections.set(p.section || 'Menu', [...(sections.get(p.section || 'Menu') ?? []), p]);
-  const current = order.data;
 
   return (
     <div className="stack">
@@ -82,10 +93,10 @@ export function Pos() {
         </select>
         <input placeholder="Table / seat / room" value={table} onChange={(e) => setTable(e.target.value)}
                aria-label="Table" style={{ width: 160 }} />
-        <button className="primary" disabled={!outletId} onClick={() => void newOrder()}>New order</button>
+        <button className="primary" disabled={!outletId || newOrder.isPending} onClick={() => newOrder.mutate()}>New order</button>
       </>} />
       {notice && <div className="alert success">{notice}</div>}
-      <ErrorAlert error={outlets.error || call.error} />
+      <ErrorAlert error={outlets.error || call.error || newOrder.error || addItem.error} />
       {outlets.data && !outlets.data.length && <Empty>You haven't been given access to any outlet.</Empty>}
       <div className="pos-layout">
         <div className="stack">
@@ -101,8 +112,8 @@ export function Pos() {
               <h3 className="muted" style={{ fontSize: 13, textTransform: 'uppercase', margin: '4px 0 8px' }}>{section}</h3>
               <div className="pos-products">
                 {items.map((p) => (
-                  <button key={p.id} className="pos-product" disabled={!current || !p.is_available || (p.track_stock && p.stock_quantity <= 0)}
-                          onClick={() => call.mutate({ path: `pos/orders/${orderId}/items/`, body: { product: p.id, quantity: 1 } })}>
+                  <button key={p.id} className="pos-product" disabled={addItem.isPending || !p.is_available || (p.track_stock && p.stock_quantity <= 0)}
+                          onClick={() => addItem.mutate(p)}>
                     <span>{p.name}</span>
                     <strong>{formatMoney(p.price)}</strong>
                     {p.track_stock && <small className="muted">{p.stock_quantity} left</small>}
@@ -113,7 +124,7 @@ export function Pos() {
           ))}
         </div>
         <aside className="card pos-ticket">
-          {!current ? <div className="muted">Select or start an order.</div> : (
+          {!current ? <div className="muted">Tap an item to start a new order{table ? ` for ${table}` : ''}, or pick an open order.</div> : (
             <div className="stack">
               <div><h2 style={{ margin: 0 }}>{current.table_label || 'Order'}</h2><span className="muted">{current.number}</span></div>
               {!current.items.length ? <div className="muted">Tap items to add them.</div> : (

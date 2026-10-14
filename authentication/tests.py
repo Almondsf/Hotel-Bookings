@@ -290,3 +290,10 @@ class BrowserCookieSessionTests(AuthTestCase):
 
     def test_refresh_without_any_token(self):
         self.assertEqual(self.client.post(reverse('token-refresh'), {}, format='json').status_code, 401)
+
+    def test_page_reloads_do_not_use_up_the_login_budget(self):
+        """Each page load refreshes the session; a busy desk must not be locked out of signing in."""
+        self.login('ada@hotel.com', HTTP_X_AUTH_MODE='cookie')
+        for _ in range(15):  # more than the 10/min login allowance
+            self.assertEqual(self.client.post(reverse('token-refresh'), {}, format='json').status_code, 200)
+        self.assertEqual(self.login('ada@hotel.com').status_code, 200)
