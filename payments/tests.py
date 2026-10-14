@@ -228,3 +228,15 @@ class StaffPaymentTests(FakeGatewayMixin, APITestCase):
         # Can't refund more than the guest is owed (balance is 0)
         self.assertEqual(self.client.post(url, {'amount': '1000', 'reason': 'Goodwill'}, format='json').status_code, 400)
         self.assertEqual(self.gateway.refunds, [])
+
+
+class EnabledGatewayTests(SimpleTestCase):
+    @override_settings(PAYMENT_GATEWAYS=['PAYSTACK', 'FLUTTERWAVE'], PAYSTACK_SECRET_KEY='sk_test_x', FLUTTERWAVE_SECRET_KEY='')
+    def test_gateways_without_credentials_are_not_offered(self):
+        from payments.gateways import enabled_gateways
+        self.assertEqual(enabled_gateways(), ['PAYSTACK'])
+
+    @override_settings(PAYMENT_GATEWAYS=['PAYSTACK'], PAYSTACK_SECRET_KEY='')
+    def test_no_credentials_means_no_online_payment(self):
+        from payments.gateways import enabled_gateways
+        self.assertEqual(enabled_gateways(), [])

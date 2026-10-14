@@ -221,7 +221,12 @@ export function CheckoutPage() {
                   {code === 'PAYSTACK' ? 'Paystack (card, bank, USSD)' : 'Flutterwave (card, bank, USSD)'}</label>
               ))}
             </div>
-            <span className="muted" style={{ fontSize: 13 }}>You'll pay securely on the provider's page. We never see or store your card details.</span>
+            {hotel.data && !hotel.data.payment_gateways.length ? (
+              <div className="alert error" role="alert">
+                Online payment isn't available right now. Please book by phone{hotel.data.phone && <> on <a href={`tel:${hotel.data.phone.replace(/\s/g, '')}`}>{hotel.data.phone}</a></>}
+                {hotel.data.email && <> or email <a href={`mailto:${hotel.data.email}`}>{hotel.data.email}</a></>}.
+              </div>
+            ) : <span className="muted" style={{ fontSize: 13 }}>You'll pay securely on the provider's page. We never see or store your card details.</span>}
             <label className="checkbox"><input type="checkbox" checked={guest.accepts_marketing} onChange={(e) => setGuest({ ...guest, accepts_marketing: e.target.checked })} />
               Send me offers and news (optional)</label>
             <label className="checkbox"><input type="checkbox" required checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />

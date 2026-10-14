@@ -13,6 +13,7 @@ export const NAV: { to: string; label: string; capability: Capability }[] = [
   { to: '/reservations/new', label: 'New reservation', capability: 'bookings.manage' },
   { to: '/guests', label: 'Guests', capability: 'bookings.view' },
   { to: '/folios', label: 'Folios', capability: 'folios.view' },
+  { to: '/companies', label: 'Companies', capability: 'folios.view' },
   { to: '/housekeeping', label: 'Housekeeping', capability: 'housekeeping.view' },
   { to: '/maintenance', label: 'Maintenance', capability: 'maintenance.view' },
   { to: '/pos', label: 'Point of sale', capability: 'pos.use' },

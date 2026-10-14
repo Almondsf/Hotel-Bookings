@@ -176,8 +176,10 @@ MAX_GUESTS_PER_SEARCH = env.int('MAX_GUESTS_PER_SEARCH', default=50)
 #   https://<api-host>/api/payments/webhooks/paystack/
 #   https://<api-host>/api/payments/webhooks/flutterwave/
 PAYMENT_GATEWAYS = env.list('PAYMENT_GATEWAYS', default=['PAYSTACK', 'FLUTTERWAVE'])
-PAYSTACK_SECRET_KEY = env('PAYSTACK_SECRET_KEY', default='')
-FLUTTERWAVE_SECRET_KEY = env('FLUTTERWAVE_SECRET_KEY', default='')
+# The test suite drives the gateways through fakes, so it gets placeholder keys; everywhere else a
+# gateway without its key is simply not offered (see payments.gateways.enabled_gateways).
+PAYSTACK_SECRET_KEY = env('PAYSTACK_SECRET_KEY', default='sk_test_placeholder' if TESTING else '')
+FLUTTERWAVE_SECRET_KEY = env('FLUTTERWAVE_SECRET_KEY', default='FLWSECK_TEST-placeholder' if TESTING else '')
 FLUTTERWAVE_WEBHOOK_HASH = env('FLUTTERWAVE_WEBHOOK_HASH', default='')
 # Where the gateway sends the guest back after paying (fixed server-side, so
 # it can't be abused as an open redirect)
