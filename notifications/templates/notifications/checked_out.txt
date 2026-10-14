@@ -1,0 +1,7 @@
+{% autoescape off %}Dear {{ guest.first_name }},
+
+Thank you for staying with us. Your final invoice is attached.
+
+We hope to welcome you back soon.
+{{ hotel_name }}
+{% endautoescape %}

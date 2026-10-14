@@ -1,56 +1,80 @@
-from rest_framework.generics import CreateAPIView
-from rest_framework.response import Response
 from rest_framework import status
-from .serializers import BookingCreateSerializer, BookingConfirmationSerializer
-from rest_framework.views import APIView
+from rest_framework.generics import CreateAPIView, GenericAPIView
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+
+from audit.models import AuditLog
+from audit.services import record
+
+from . import lifecycle
+from .services import create_online_booking
+from .serializers import (
+    BookingConfirmationSerializer,
+    BookingCreateSerializer,
+    GuestBookingAccessSerializer,
+    GuestCancelSerializer,
+)
+
+
+def not_found():
+    # Same response for "no such booking" and "wrong email", so these endpoints
+    # can't be used to discover valid confirmation numbers.
+    return Response({"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
 
 class CreateBookingView(CreateAPIView):
     serializer_class = BookingCreateSerializer
-    
+    permission_classes = [AllowAny]
+    throttle_scope = 'booking_create'
+
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        
-        try:
-            booking = serializer.save()
-        except Exception as e:
-            return Response(
-                {"error": str(e)}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        confirmation_serializer = BookingConfirmationSerializer(booking)
-        return Response(confirmation_serializer.data, status=status.HTTP_201_CREATED)
-    
-class BookingLookupView(APIView):
-    
+        booking, txn = create_online_booking(serializer.validated_data)
+        record(AuditLog.Action.BOOKING_CREATED, request=request, actor_email=booking.guest.email, target=booking)
+        return Response({
+            **BookingConfirmationSerializer(booking).data,
+            # Send the guest here to pay; the booking is confirmed once payment is verified
+            'payment': {'reference': txn.reference, 'gateway': txn.gateway, 'amount': str(txn.amount),
+                        'currency': txn.currency, 'authorization_url': txn.authorization_url},
+        }, status=status.HTTP_201_CREATED)
+
+
+class GuestBookingView(GenericAPIView):
+    """Base for guest self-service endpoints authenticated by confirmation number + email."""
+    permission_classes = [AllowAny]
+    throttle_scope = 'booking_lookup'
+
+    def validated(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return None
+        return serializer.validated_data
+
+
+class BookingLookupView(GuestBookingView):
+    serializer_class = GuestBookingAccessSerializer
+
     def post(self, request, *args, **kwargs):
-        confirmation_number = request.data.get('confirmation_number')
-        email = request.data.get('email')
-        
-        # Validate both are provided
-        if not confirmation_number or not email:
-            return Response(
-                {"error": "Both confirmation_number and email are required."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Look up booking
-        try:
-            booking = Booking.objects.get(confirmation_number=confirmation_number)
-        except Booking.DoesNotExist:
-            return Response(
-                {"error": "Booking not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # Verify email matches
-        if booking.guest.email != email:
-            return Response(
-                {"error": "Email does not match booking records."},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        # Return booking details
-        serializer = BookingConfirmationSerializer(booking)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        data = self.validated(request)
+        if data is None:
+            return Response({"error": "Both confirmation_number and a valid email are required."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if data['booking'] is None:
+            return not_found()
+        return Response(BookingConfirmationSerializer(data['booking']).data)
+
+
+class GuestCancelBookingView(GuestBookingView):
+    """Guest self-service cancellation under the hotel's cancellation policy."""
+    serializer_class = GuestCancelSerializer
+
+    def post(self, request, *args, **kwargs):
+        data = self.validated(request)
+        if data is None:
+            return Response({"error": "Both confirmation_number and a valid email are required."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if data['booking'] is None:
+            return not_found()
+        booking = lifecycle.cancel(data['booking'], reason=data['reason'], request=request, by_guest=True)
+        return Response(BookingConfirmationSerializer(booking).data)

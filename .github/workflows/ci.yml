@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: {POSTGRES_DB: hotel, POSTGRES_USER: hotel, POSTGRES_PASSWORD: hotel}
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    env:
+      DJANGO_SECRET_KEY: ci-only-secret
+      DATABASE_URL: postgres://hotel:hotel@localhost:5432/hotel
+      FIELD_ENCRYPTION_KEYS: ${{ secrets.CI_FIELD_ENCRYPTION_KEY || 'cXdlcnR5dWlvcGFzZGZnaGprbHp4Y3Zibm0xMjM0NTY=' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - run: python manage.py makemigrations --check --dry-run
+      - run: python manage.py test --parallel
+      - name: Production settings audit
+        run: python manage.py check --deploy --fail-level WARNING
+        env:
+          DJANGO_DEBUG: "False"
+          DJANGO_ALLOWED_HOSTS: example.com
+          # Throwaway value, long enough for the audit's strength check (never used outside CI)
+          DJANGO_SECRET_KEY: ci-only-deploy-audit-key-7f3a9c2e5b8d1f4a6c0e9b2d7a5f3c8e1b4d6a9f
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: frontend}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json}
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

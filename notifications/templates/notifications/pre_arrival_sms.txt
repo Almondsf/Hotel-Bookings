@@ -1,0 +1,1 @@
+{% autoescape off %}{{ hotel_name }}: we look forward to seeing you tomorrow! Check-in from {{ check_in_time }}. Booking {{ booking.confirmation_number }}.{% endautoescape %}

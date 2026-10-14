@@ -9,5 +9,5 @@ class ReceptionistProfile(models.Model):
     desk_number = models.CharField(max_length=10)
 
     def __str__(self):
-        return f"Receptionist Profile for {self.user.get_user()}"
+        return f"Receptionist Profile for {self.user.full_name}"
     

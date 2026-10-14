@@ -1,125 +1,195 @@
-from booking.models import Booking, Payment, Guest
-from django.db import transaction
-import uuid
-import random
+import secrets
 import string
-from rooms.services import get_available_rooms_for_type, calculate_total_price, calculate_price_per_night
-from django.core.mail import send_mail
+from datetime import timedelta
+
 from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
 
-def process_paypal_payment(payment_token, amount):
-    # TODO: Implement actual PayPal API integration
-    # For now, always return True for testing
-    return True
+from audit.models import AuditLog
+from audit.services import record
+from booking.allocation import allocate_room, lock_room_types
+from booking.exceptions import BookingError
+from booking.models import Booking, BookingGroup, Guest
+from booking.validation import validate_stay
+from hotel.errors import DomainError
+from notifications.services import notify
+from billing import services as billing
+from billing.models import ChargeCategory
+from billing.taxes import quote
+from booking.pricing import create_nights, summarize
+from rates.engine import STAFF, WEBSITE, RatePlanUnavailable, require_plan
+from rooms.services import nightly_rates
+
+CODE_CHARS = string.ascii_uppercase + string.digits
 
 
+def _generate_code(prefix, model, field):
+    while True:
+        code = f'{prefix}-' + ''.join(secrets.choice(CODE_CHARS) for _ in range(6))
+        if not model.objects.filter(**{field: code}).exists():
+            return code
 
-def send_confirmation_email(booking):
-    """Send booking confirmation email to guest"""
-    subject = f'Booking Confirmation - {booking.confirmation_number}'
-    
-    message = f"""
-    Dear {booking.guest.first_name} {booking.guest.last_name},
 
-    Thank you for your booking!
+def generate_confirmation_number():
+    """Generate a short, unique confirmation number like BK-ABC123"""
+    return _generate_code('BK', Booking, 'confirmation_number')
 
-    Booking Details:
-    Confirmation Number: {booking.confirmation_number}
-    Room: {booking.room.room_type.name} - Room {booking.room.room_number}
-    Check-in: {booking.check_in_date}
-    Check-out: {booking.check_out_date}
-    Guests: {booking.number_of_adults} adults, {booking.number_of_children} children
-    Total Price: ${booking.total_price}
 
-    We look forward to welcoming you!
+def generate_group_reference():
+    return _generate_code('GR', BookingGroup, 'reference')
 
-    Best regards,
-    Hotel Team
+
+def send_booking_confirmation(booking):
+    """Email / SMS the guest their confirmation once the transaction commits."""
+    notify('booking_confirmed', booking)
+
+
+def create_online_booking(validated_data):
     """
-    
-    from_email = settings.DEFAULT_FROM_EMAIL
-    recipient_list = [booking.guest.email]
-    
-    send_mail(
-        subject=subject,
-        message=message,
-        from_email=from_email,
-        recipient_list=recipient_list,
-        fail_silently=False,
-    )
+    Online booking: hold a room and start a gateway checkout. The booking is
+    confirmed when the payment is verified (payments.services.confirm_payment).
+    Returns (booking, payment_transaction).
+    """
+    from payments.models import PaymentTransaction
+    from payments.services import start_payment
 
-def create_booking_with_payment(validated_data):
-    guest_data = validated_data.pop('guest')
-    room_type = validated_data.pop('room_type')
-    check_in_date = validated_data.pop('check_in_date')
-    check_out_date = validated_data.pop('check_out_date')
-    number_of_adults = validated_data.pop('number_of_adults')
-    number_of_children = validated_data.pop('number_of_children')
-    special_requests = validated_data.pop('special_requests', '')
-    payment_token = validated_data.pop('payment_token')
-    payment_method = validated_data.pop('payment_method')
-    
-    # 1. create guest object 
-    guest = Guest.objects.create(**guest_data)
-    
-    # 2. find an available room
-    available_rooms = get_available_rooms_for_type(room_type, check_in_date, check_out_date)
-    if not available_rooms.exists():
-        raise Exception("No available rooms")  # Should never happen due to validation
-    room = available_rooms.first()
-    total_price = calculate_total_price(room_type, check_in_date, check_out_date)
-    price_per_night = calculate_price_per_night(room_type, check_in_date)
-    def generate_confirmation_number():
-        """Generate a short, unique confirmation number like BK-ABC123"""
-        chars = string.ascii_uppercase + string.digits
-        random_part = ''.join(random.choices(chars, k=6))
-        code = f"BK-{random_part}"
-        
-        # Ensure uniqueness - regenerate if exists
-        while Booking.objects.filter(confirmation_number=code).exists():
-            random_part = ''.join(random.choices(chars, k=6))
-            code = f"BK-{random_part}"
-        
-        return code
+    guest_data = validated_data['guest']
+    room_type = validated_data['room_type']
+    check_in_date = validated_data['check_in_date']
+    check_out_date = validated_data['check_out_date']
+    rate_plan = validated_data.get('rate_plan')
 
-    # Then in create_booking_with_payment(), replace the uuid line with:
-    confirmation_number = generate_confirmation_number()
-    
-    # 3. create booking and payment atomically
-    payment_success = process_paypal_payment(payment_token, total_price)
-    if not payment_success:
-        raise Exception("Payment failed")
-    
+    rates = _priced(rate_plan, room_type, check_in_date, check_out_date, channel=WEBSITE,
+                    promo_code=validated_data.get('promo_code'))
+    total_price, average_rate = summarize(rates)
+    # The guest pays the full price including taxes up front
+    amount_due = quote(ChargeCategory.ROOM, total_price)['gross']
+
     with transaction.atomic():
+        lock_room_types([room_type])
+        room = allocate_room(room_type, check_in_date, check_out_date)
+        guest = Guest.objects.create(**guest_data)
         booking = Booking.objects.create(
             guest=guest,
             room=room,
             check_in_date=check_in_date,
             check_out_date=check_out_date,
-            number_of_adults=number_of_adults,
-            number_of_children=number_of_children,
-            special_requests=special_requests,
-            price_per_night=price_per_night,
+            number_of_adults=validated_data['number_of_adults'],
+            number_of_children=validated_data.get('number_of_children', 0),
+            special_requests=validated_data.get('special_requests', ''),
+            price_per_night=average_rate,
             total_price=total_price,
-            status='CONFIRMED',
-            confirmation_number=confirmation_number
+            status=Booking.Status.PENDING,
+            source=Booking.Source.WEBSITE,
+            rate_plan=rate_plan,
+            hold_expires_at=timezone.now() + timedelta(minutes=settings.BOOKING_HOLD_MINUTES),
+            confirmation_number=generate_confirmation_number(),
         )
-        
-        payment = Payment.objects.create(
-            booking=booking,
-            amount=total_price,
-            payment_method=payment_method,
-            transaction_id=payment_token,  # Store the PayPal token
-            status='COMPLETED',
-            payment_gateway='PAYPAL'
-        )
-        
-        
-    # TODO: Implement email sending
-    try:
-        send_confirmation_email(booking)
-    except Exception as e:
-        print(f"Failed to send email: {e}")
-        
-    return booking
+        create_nights(booking, rates)
+        folio = billing.folio_for(booking)
 
+    # Talk to the gateway outside the transaction: no locks held over the network.
+    try:
+        txn = start_payment(
+            gateway=validated_data['gateway'], folio=folio, amount=amount_due, email=guest.email,
+            purpose=PaymentTransaction.Purpose.BOOKING_PREPAYMENT, booking=booking,
+            customer_name=str(guest), description=f"Booking {booking.confirmation_number}",
+        )
+    except DomainError:
+        # Release the hold straight away rather than blocking the room for the hold period
+        Booking.objects.filter(pk=booking.pk).update(
+            status=Booking.Status.CANCELLED, cancelled_at=timezone.now(), cancellation_reason="Payment could not be started",
+        )
+        raise
+    return booking, txn
+
+
+def _priced(rate_plan, room_type, check_in_date, check_out_date, *, channel, promo_code=None, account=None,
+            override=None):
+    """Nightly rates for a new booking, enforcing the rate plan's conditions."""
+    if override is not None:
+        return [(date, override) for date, _ in nightly_rates(room_type, check_in_date, check_out_date)]
+    try:
+        return require_plan(rate_plan, room_type, check_in_date, check_out_date, channel=channel,
+                            promo_code=promo_code, account=account) if rate_plan else \
+            nightly_rates(room_type, check_in_date, check_out_date)
+    except RatePlanUnavailable as e:
+        raise BookingError(f"{rate_plan.name} isn't available: {'; '.join(e.reasons)}.", field='rate_plan')
+
+
+def create_staff_reservation(*, guest, rooms, check_in_date, check_out_date, special_requests='',
+                             source=Booking.Source.FRONT_DESK, notes='', request=None, rate_plan=None,
+                             corporate_account=None, rate_override=None, override_reason=''):
+    """
+    Reservation taken by staff (phone, walk-in, corporate...). Confirmed
+    immediately; payment is settled through the guest's folio.
+
+    `rooms` is a list of dicts: {room_type, room (optional), number_of_adults, number_of_children}.
+    More than one room creates a BookingGroup. `rate_override` (a nightly
+    rate) needs `override_reason`; permission is checked by the caller.
+    """
+    if not rooms:
+        raise BookingError("At least one room is required.", field='rooms')
+    if rate_override is not None and not override_reason:
+        raise BookingError("A reason is required to override the rate.", field='override_reason')
+
+    actor = request.user if request is not None else None
+    for item in rooms:
+        validate_stay(item['room_type'], check_in_date, check_out_date,
+                      item['number_of_adults'], item['number_of_children'])
+
+    now = timezone.now()
+    with transaction.atomic():
+        lock_room_types(item['room_type'] for item in rooms)
+
+        if isinstance(guest, dict):
+            guest = Guest.objects.create(**guest)
+
+        group = None
+        if len(rooms) > 1:
+            group = BookingGroup.objects.create(
+                reference=generate_group_reference(), booker=guest, notes=notes, created_by=actor,
+            )
+
+        bookings, taken = [], []
+        for item in rooms:
+            room_type = item['room_type']
+            room = allocate_room(room_type, check_in_date, check_out_date,
+                                 preferred_room=item.get('room'), taken=taken)
+            taken.append(room.pk)
+            rates = _priced(rate_plan, room_type, check_in_date, check_out_date, channel=STAFF,
+                            account=corporate_account, override=rate_override)
+            total_price, average_rate = summarize(rates)
+            booking = Booking.objects.create(
+                guest=guest,
+                room=room,
+                group=group,
+                check_in_date=check_in_date,
+                check_out_date=check_out_date,
+                number_of_adults=item['number_of_adults'],
+                number_of_children=item['number_of_children'],
+                special_requests=special_requests,
+                price_per_night=average_rate,
+                total_price=total_price,
+                status=Booking.Status.CONFIRMED,
+                confirmed_at=now,
+                source=source,
+                created_by=actor,
+                rate_plan=rate_plan,
+                corporate_account=corporate_account,
+                nightly_rate_override=rate_override,
+                rate_override_reason=override_reason,
+                confirmation_number=generate_confirmation_number(),
+            )
+            create_nights(booking, rates)
+            bookings.append(booking)
+
+    for booking in bookings:
+        record(AuditLog.Action.BOOKING_CREATED, request=request, target=booking,
+               changes={'source': booking.source, 'group': group.reference if group else None,
+                        'rate_plan': rate_plan.code if rate_plan else 'BAR',
+                        'rate_override': str(rate_override) if rate_override is not None else None,
+                        'override_reason': override_reason or None})
+        send_booking_confirmation(booking)
+    return bookings

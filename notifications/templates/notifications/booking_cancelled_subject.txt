@@ -1,0 +1,1 @@
+{% autoescape off %}Booking {{ booking.confirmation_number }} cancelled{% endautoescape %}

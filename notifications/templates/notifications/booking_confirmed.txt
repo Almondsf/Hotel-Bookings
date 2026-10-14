@@ -1,0 +1,17 @@
+{% autoescape off %}Dear {{ guest.first_name }},
+
+Thank you for choosing {{ hotel_name }}. Your booking is confirmed.
+
+Confirmation number: {{ booking.confirmation_number }}
+Room:                {{ booking.room.room_type.name }}
+Arrival:             {{ booking.check_in_date|date:"l j F Y" }} (from {{ check_in_time }})
+Departure:           {{ booking.check_out_date|date:"l j F Y" }} (by {{ check_out_time }})
+Guests:              {{ booking.number_of_adults }} adult{{ booking.number_of_adults|pluralize }}{% if booking.number_of_children %}, {{ booking.number_of_children }} child{{ booking.number_of_children|pluralize:"ren" }}{% endif %}
+Room total:          NGN {{ booking.total_price }} (before taxes)
+
+Please bring a valid ID (passport, NIN, driver's licence or voter's card) for check-in.
+You can view or cancel your booking online with your confirmation number and email.
+
+We look forward to welcoming you.
+{{ hotel_name }}{% if hotel_phone %} · {{ hotel_phone }}{% endif %}
+{% endautoescape %}

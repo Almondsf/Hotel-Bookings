@@ -1,0 +1,8 @@
+{% autoescape off %}Dear {{ guest.first_name }},
+
+Your booking {{ booking.confirmation_number }} ({{ booking.check_in_date|date:"j F Y" }} to {{ booking.check_out_date|date:"j F Y" }}) has been cancelled.
+{% if booking.penalty_amount %}A cancellation charge of NGN {{ booking.penalty_amount }} applies under the booking's cancellation policy; any balance paid will be refunded.
+{% else %}No cancellation charge applies.
+{% endif %}
+{{ hotel_name }}
+{% endautoescape %}

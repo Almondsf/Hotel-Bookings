@@ -1,0 +1,1 @@
+{% autoescape off %}Your booking at {{ hotel_name }} is confirmed ({{ booking.confirmation_number }}){% endautoescape %}

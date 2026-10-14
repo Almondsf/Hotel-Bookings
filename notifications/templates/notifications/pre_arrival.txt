@@ -1,0 +1,12 @@
+{% autoescape off %}Dear {{ guest.first_name }},
+
+We look forward to welcoming you tomorrow, {{ booking.check_in_date|date:"l j F" }}.
+Check-in is from {{ check_in_time }}. Please bring a valid ID.
+
+Confirmation number: {{ booking.confirmation_number }}
+{% if booking.special_requests %}Your requests: {{ booking.special_requests }}
+{% endif %}
+Need airport pickup or an early check-in? Just reply to this email{% if hotel_phone %} or call {{ hotel_phone }}{% endif %}.
+
+{{ hotel_name }}
+{% endautoescape %}

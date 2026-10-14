@@ -1,0 +1,337 @@
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+
+import { api, ApiError, post } from '../api/client';
+import { ErrorAlert, Field, fieldError, Loading } from '../components/ui';
+import { addDays, formatDate, formatMoney, todayISO } from '../lib/format';
+import './guest.css';
+import './home.css';
+
+interface HotelInfo {
+  name: string; address: string; phone: string; email: string; check_in_time: string; check_out_time: string;
+  cancellation_policy: string; payment_gateways: string[];
+}
+
+interface RatePlanOffer {
+  code: string; name: string; description: string; meal_plan_name: string; is_refundable: boolean;
+  total_price: string; taxes: string; total_with_taxes: string;
+}
+
+interface RoomOffer {
+  id: number; name: string; description: string; max_adults: number; max_children: number; bed_type: string;
+  size: number; primary_image: string | null; rate_plans: RatePlanOffer[];
+}
+
+interface Confirmation {
+  confirmation_number: string; status: string; room_type_name: string; check_in_date: string; check_out_date: string;
+  total_with_taxes: string; cancellation_policy: string; cancellation_fee_if_cancelled_now: string | null;
+  rate_plan: { name: string; is_refundable: boolean };
+  guest: { first_name: string; last_name: string; email: string };
+}
+
+export function useHotel() {
+  return useQuery({ queryKey: ['hotel'], queryFn: () => api<HotelInfo>('hotel/'), staleTime: 3_600_000 });
+}
+
+/** `wide` lets a page (the home page) run edge to edge instead of in the centred booking column. */
+export function GuestLayout({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
+  const hotel = useHotel();
+  useEffect(() => { if (hotel.data) document.title = hotel.data.name; }, [hotel.data]);
+  return (
+    <div className="guest">
+      <header className="guest-header">
+        <Link to="/" className="guest-brand">{hotel.data?.name ?? 'Hotel'}</Link>
+        <nav className="guest-nav" aria-label="Site">
+          <a href="/#rooms">Rooms</a>
+          <a href="/#offers">Offers</a>
+          <a href="/#dining">Dining</a>
+          <a href="/#facilities">Facilities</a>
+          <a href="/#events">Events</a>
+          <a href="/#contact">Contact</a>
+          <Link to="/book" className="button guest-book">Book now</Link>
+        </nav>
+      </header>
+      <main className={wide ? 'guest-wide' : 'guest-main'}>{children}</main>
+      <footer className="guest-footer">
+        <div className="guest-footer-grid">
+          <div>
+            <h4>{hotel.data?.name ?? 'Hotel'}</h4>
+            {hotel.data?.address && <p>{hotel.data.address}</p>}
+            {hotel.data && <p>{[hotel.data.phone, hotel.data.email].filter(Boolean).join(' · ')}</p>}
+            {hotel.data && <p>Check-in from {hotel.data.check_in_time} · Check-out by {hotel.data.check_out_time}</p>}
+          </div>
+          <div>
+            <h4>Explore</h4>
+            <ul>
+              <li><a href="/#rooms">Rooms & suites</a></li>
+              <li><a href="/#dining">Dining</a></li>
+              <li><a href="/#facilities">Facilities</a></li>
+              <li><a href="/#gallery">Gallery</a></li>
+            </ul>
+          </div>
+          <div>
+            <h4>Your stay</h4>
+            <ul>
+              <li><Link to="/book">Book a room</Link></li>
+              <li><Link to="/booking/manage">Manage my booking</Link></li>
+              <li><a href="/#contact">Contact & policies</a></li>
+            </ul>
+          </div>
+        </div>
+        <div className="guest-footer-legal">
+          <span>© {new Date().getFullYear()} {hotel.data?.name ?? 'Hotel'}. All rights reserved.</span>
+          <Link to="/login">Staff sign in</Link>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+function nights(from: string, to: string) {
+  return Math.round((new Date(to).getTime() - new Date(from).getTime()) / 86_400_000);
+}
+
+export function SearchPage() {
+  const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const [form, setForm] = useState({
+    check_in: params.get('check_in') ?? todayISO(),
+    check_out: params.get('check_out') ?? addDays(todayISO(), 1),
+    adults: params.get('adults') ?? '2',
+    children: params.get('children') ?? '0',
+    promo_code: params.get('promo_code') ?? '',
+  });
+  const searched = params.has('check_in');
+  const query = Object.fromEntries(params.entries());
+  const results = useQuery({
+    queryKey: ['guest-search', query],
+    queryFn: () => api<{ room_types: RoomOffer[]; booking_plans: unknown }>('rooms/search/', { query }),
+    enabled: searched,
+  });
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setParams(Object.fromEntries(Object.entries(form).filter(([, v]) => v !== '')));
+  }
+
+  const stay = nights(params.get('check_in') ?? '', params.get('check_out') ?? '');
+  return (
+    <GuestLayout>
+      <section className="guest-hero">
+        <h1>Book your stay</h1>
+        <form className="guest-search" onSubmit={submit}>
+          <Field label="Arrival"><input type="date" required min={todayISO()} value={form.check_in}
+                                        onChange={(e) => setForm({ ...form, check_in: e.target.value, check_out: e.target.value >= form.check_out ? addDays(e.target.value, 1) : form.check_out })} /></Field>
+          <Field label="Departure"><input type="date" required min={addDays(form.check_in, 1)} value={form.check_out}
+                                          onChange={(e) => setForm({ ...form, check_out: e.target.value })} /></Field>
+          <Field label="Adults"><input type="number" min={1} max={10} value={form.adults} onChange={(e) => setForm({ ...form, adults: e.target.value })} /></Field>
+          <Field label="Children"><input type="number" min={0} max={10} value={form.children} onChange={(e) => setForm({ ...form, children: e.target.value })} /></Field>
+          <Field label="Promo code"><input value={form.promo_code} onChange={(e) => setForm({ ...form, promo_code: e.target.value })} /></Field>
+          <button className="primary guest-cta">Check availability</button>
+        </form>
+      </section>
+      {searched && (
+        <section className="stack">
+          <ErrorAlert error={results.error} />
+          {results.isLoading && <Loading />}
+          {results.data && !results.data.room_types.length && (
+            <div className="card guest-empty">
+              No single room fits {params.get('adults')} adult(s){Number(params.get('children')) ? ` and ${params.get('children')} child(ren)` : ''} on these dates.
+              Try different dates, or contact us to book several rooms together.
+            </div>
+          )}
+          {results.data?.room_types.map((room) => (
+            <article className="card guest-room" key={room.id}>
+              {room.primary_image ? <img src={room.primary_image} alt={room.name} loading="lazy" />
+                : <div className="guest-room-placeholder" aria-hidden="true" />}
+              <div className="stack" style={{ gap: 10 }}>
+                <div>
+                  <h2 style={{ margin: 0 }}>{room.name}</h2>
+                  <div className="muted">{room.size} sq ft · {room.bed_type.toLowerCase()} bed · up to {room.max_adults} adults{room.max_children ? `, ${room.max_children} children` : ''}</div>
+                </div>
+                <p style={{ margin: 0 }}>{room.description}</p>
+                {room.rate_plans.length === 0 && <div className="muted">Not available to book online for these dates.</div>}
+                {room.rate_plans.map((plan) => (
+                  <div className="guest-rate" key={plan.code}>
+                    <div>
+                      <strong>{plan.name}</strong>
+                      <div className="muted" style={{ fontSize: 13 }}>{plan.meal_plan_name} · {plan.is_refundable ? 'Free cancellation available' : 'Non-refundable'}</div>
+                    </div>
+                    <div className="guest-price">
+                      <strong>{formatMoney(plan.total_with_taxes)}</strong>
+                      <span className="muted">{stay} night{stay === 1 ? '' : 's'}, incl. taxes</span>
+                    </div>
+                    <button className="primary" onClick={() => navigate(`/book/checkout?${new URLSearchParams({ ...query, room_type: String(room.id), rate_plan: plan.code })}`)}>
+                      Select</button>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ))}
+        </section>
+      )}
+    </GuestLayout>
+  );
+}
+
+export function CheckoutPage() {
+  const [params] = useSearchParams();
+  const hotel = useHotel();
+  const [guest, setGuest] = useState({ first_name: '', last_name: '', email: '', phone_number: '', accepts_marketing: false });
+  const [requests, setRequests] = useState('');
+  const [gateway, setGateway] = useState('');
+  const [agreed, setAgreed] = useState(false);
+  useEffect(() => { if (hotel.data && !gateway) setGateway(hotel.data.payment_gateways[0] ?? ''); }, [hotel.data, gateway]);
+
+  const book = useMutation({
+    mutationFn: () => post<Confirmation & { payment: { authorization_url: string } }>('bookings/create/', {
+      guest, room_type: Number(params.get('room_type')), check_in_date: params.get('check_in'),
+      check_out_date: params.get('check_out'), number_of_adults: Number(params.get('adults') ?? 1),
+      number_of_children: Number(params.get('children') ?? 0), special_requests: requests,
+      rate_plan: params.get('rate_plan'), promo_code: params.get('promo_code') ?? '', gateway,
+    }),
+    // Off to the payment provider's secure page
+    onSuccess: (data) => window.location.assign(data.payment.authorization_url),
+  });
+
+  return (
+    <GuestLayout>
+      <form className="guest-checkout" onSubmit={(e) => { e.preventDefault(); book.mutate(); }}>
+        <div className="stack">
+          <h1>Your details</h1>
+          <ErrorAlert error={book.error} />
+          <div className="card form-grid">
+            <Field label="First name"><input required autoComplete="given-name" value={guest.first_name} onChange={(e) => setGuest({ ...guest, first_name: e.target.value })} /></Field>
+            <Field label="Last name"><input required autoComplete="family-name" value={guest.last_name} onChange={(e) => setGuest({ ...guest, last_name: e.target.value })} /></Field>
+            <Field label="Email" hint="Your confirmation is sent here" error={fieldError(book.error, 'guest')}>
+              <input type="email" required autoComplete="email" value={guest.email} onChange={(e) => setGuest({ ...guest, email: e.target.value })} /></Field>
+            <Field label="Mobile number" hint="For booking updates by SMS">
+              <input type="tel" autoComplete="tel" value={guest.phone_number} onChange={(e) => setGuest({ ...guest, phone_number: e.target.value })} /></Field>
+          </div>
+          <div className="card">
+            <Field label="Special requests (optional)" hint="Airport pickup, early check-in, dietary needs…">
+              <textarea value={requests} onChange={(e) => setRequests(e.target.value)} /></Field>
+          </div>
+          <div className="card stack">
+            <strong>Payment</strong>
+            <div className="row">
+              {hotel.data?.payment_gateways.map((code) => (
+                <label key={code} className="checkbox"><input type="radio" name="gateway" checked={gateway === code} onChange={() => setGateway(code)} />
+                  {code === 'PAYSTACK' ? 'Paystack (card, bank, USSD)' : 'Flutterwave (card, bank, USSD)'}</label>
+              ))}
+            </div>
+            {hotel.data && !hotel.data.payment_gateways.length ? (
+              <div className="alert error" role="alert">
+                Online payment isn't available right now. Please book by phone{hotel.data.phone && <> on <a href={`tel:${hotel.data.phone.replace(/\s/g, '')}`}>{hotel.data.phone}</a></>}
+                {hotel.data.email && <> or email <a href={`mailto:${hotel.data.email}`}>{hotel.data.email}</a></>}.
+              </div>
+            ) : <span className="muted" style={{ fontSize: 13 }}>You'll pay securely on the provider's page. We never see or store your card details.</span>}
+            <label className="checkbox"><input type="checkbox" checked={guest.accepts_marketing} onChange={(e) => setGuest({ ...guest, accepts_marketing: e.target.checked })} />
+              Send me offers and news (optional)</label>
+            <label className="checkbox"><input type="checkbox" required checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
+              I accept the cancellation policy and the hotel's privacy notice</label>
+          </div>
+        </div>
+        <aside className="card stack guest-summary">
+          <strong>Your stay</strong>
+          <div>{formatDate(params.get('check_in'))} → {formatDate(params.get('check_out'))}</div>
+          <div className="muted">{params.get('adults')} adult(s){Number(params.get('children')) ? `, ${params.get('children')} child(ren)` : ''}</div>
+          <div className="muted" style={{ fontSize: 13 }}>{hotel.data?.cancellation_policy}</div>
+          <button className="primary guest-cta" disabled={book.isPending || !gateway}>{book.isPending ? 'Reserving your room…' : 'Continue to payment'}</button>
+          <span className="muted" style={{ fontSize: 12 }}>Your room is held for 15 minutes while you pay.</span>
+        </aside>
+      </form>
+    </GuestLayout>
+  );
+}
+
+export function PaymentCompletePage() {
+  const [params] = useSearchParams();
+  // Paystack returns ?reference=, Flutterwave ?tx_ref=
+  const reference = params.get('reference') ?? params.get('tx_ref') ?? '';
+  const [attempt, setAttempt] = useState(0);
+  const verify = useQuery({
+    queryKey: ['verify', reference, attempt],
+    queryFn: () => post<{ status: string; booking: { confirmation_number: string; status: string } | null }>('payments/verify/', { reference }),
+    enabled: !!reference,
+    retry: false,
+  });
+  const status = verify.data?.status;
+  useEffect(() => {
+    // The provider may take a few seconds to settle; check again a few times
+    if (status === 'INITIALIZED' && attempt < 5) {
+      const timer = setTimeout(() => setAttempt(attempt + 1), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [status, attempt]);
+
+  const booking = verify.data?.booking;
+  return (
+    <GuestLayout>
+      <div className="card guest-result">
+        {!reference && <p>We couldn't find a payment reference. If you were charged, please contact the hotel.</p>}
+        {(verify.isLoading || (status === 'INITIALIZED' && attempt < 5)) && reference && <><h1>Confirming your payment…</h1><Loading /></>}
+        {verify.error instanceof ApiError && <ErrorAlert error={verify.error} />}
+        {status === 'SUCCEEDED' && booking?.status === 'CONFIRMED' && <>
+          <h1>You're booked!</h1>
+          <p>Your confirmation number is <strong className="guest-ref">{booking.confirmation_number}</strong>. We've emailed you the details.</p>
+          <Link className="button" to="/booking/manage">View my booking</Link>
+        </>}
+        {status === 'SUCCEEDED' && booking?.status === 'CANCELLED' && <>
+          <h1>Sorry, that room was taken</h1>
+          <p>Your payment arrived after the room hold expired and the room was booked by someone else. Your payment is being refunded in full.</p>
+        </>}
+        {status === 'FAILED' && <><h1>Payment not completed</h1><p>No money was taken. <Link to="/book">Try again</Link>.</p></>}
+        {status === 'NEEDS_REVIEW' && <><h1>We're checking your payment</h1><p>Our team will confirm your booking shortly by email.</p></>}
+        {status === 'INITIALIZED' && attempt >= 5 && <><h1>Payment still processing</h1>
+          <p>We haven't received confirmation yet. You'll get an email as soon as it arrives.</p></>}
+      </div>
+    </GuestLayout>
+  );
+}
+
+export function ManageBookingPage() {
+  const [form, setForm] = useState({ confirmation_number: '', email: '' });
+  const [reason, setReason] = useState('');
+  const lookup = useMutation({ mutationFn: () => post<Confirmation>('bookings/lookup/', form) });
+  // Cancelling returns the updated booking, which then replaces the looked-up one
+  const cancel = useMutation({ mutationFn: () => post<Confirmation>('bookings/cancel/', { ...form, reason }) });
+  const booking = cancel.data ?? lookup.data;
+
+  return (
+    <GuestLayout>
+      <div className="stack" style={{ maxWidth: 640, margin: '0 auto', width: '100%' }}>
+        <h1>Manage my booking</h1>
+        <form className="card form-grid" onSubmit={(e) => { e.preventDefault(); cancel.reset(); lookup.mutate(); }}>
+          <Field label="Confirmation number"><input required value={form.confirmation_number} placeholder="BK-XXXXXX"
+                                                    onChange={(e) => setForm({ ...form, confirmation_number: e.target.value })} /></Field>
+          <Field label="Email used to book"><input type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
+          <button className="primary" style={{ alignSelf: 'end' }} disabled={lookup.isPending}>Find booking</button>
+        </form>
+        <ErrorAlert error={lookup.error || cancel.error} />
+        {booking && (
+          <div className="card stack">
+            <div className="row"><h2 style={{ margin: 0 }}>{booking.confirmation_number}</h2><span className="spacer" />
+              <span className={`badge ${booking.status === 'CANCELLED' ? 'danger' : 'info'}`}>{booking.status.replace('_', ' ').toLowerCase()}</span></div>
+            <dl className="details">
+              <dt>Guest</dt><dd>{booking.guest.first_name} {booking.guest.last_name}</dd>
+              <dt>Room</dt><dd>{booking.room_type_name} · {booking.rate_plan.name}</dd>
+              <dt>Stay</dt><dd>{formatDate(booking.check_in_date)} → {formatDate(booking.check_out_date)}</dd>
+              <dt>Total</dt><dd>{formatMoney(booking.total_with_taxes)}</dd>
+            </dl>
+            <p className="muted" style={{ margin: 0 }}>{booking.cancellation_policy}</p>
+            {booking.cancellation_fee_if_cancelled_now !== null && (
+              <div className="stack">
+                <strong>Cancel this booking</strong>
+                <span>Cancelling now costs <strong>{formatMoney(booking.cancellation_fee_if_cancelled_now)}</strong>; anything you paid above that is refunded.</span>
+                <Field label="Reason (optional)"><input value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+                <div><button className="danger" disabled={cancel.isPending} onClick={() => cancel.mutate()}>Cancel booking</button></div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </GuestLayout>
+  );
+}
