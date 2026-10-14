@@ -63,7 +63,7 @@ def _take_out_of_order(ticket, until, request):
 
 
 def _lock(ticket):
-    ticket = Ticket.objects.select_for_update().select_related('room', 'out_of_order').get(pk=ticket.pk)
+    ticket = Ticket.objects.select_for_update(of=('self',)).select_related('room', 'out_of_order').get(pk=ticket.pk)
     if ticket.status not in ACTIVE:
         raise ConflictError(f"Ticket {ticket.number} is already resolved.")
     return ticket

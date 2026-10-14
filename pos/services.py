@@ -28,7 +28,7 @@ def _ensure_access(outlet, user):
 
 
 def _lock_open(order):
-    order = Order.objects.select_for_update().select_related('outlet').get(pk=order.pk)
+    order = Order.objects.select_for_update(of=('self',)).select_related('outlet').get(pk=order.pk)
     if order.status != Order.Status.OPEN:
         raise ConflictError(f"Order {order.number} is {order.get_status_display().lower()}.")
     return order

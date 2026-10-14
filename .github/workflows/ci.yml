@@ -26,7 +26,11 @@ jobs:
       - run: python manage.py test --parallel
       - name: Production settings audit
         run: python manage.py check --deploy --fail-level WARNING
-        env: {DJANGO_DEBUG: "False", DJANGO_ALLOWED_HOSTS: example.com}
+        env:
+          DJANGO_DEBUG: "False"
+          DJANGO_ALLOWED_HOSTS: example.com
+          # Throwaway value, long enough for the audit's strength check (never used outside CI)
+          DJANGO_SECRET_KEY: ci-only-deploy-audit-key-7f3a9c2e5b8d1f4a6c0e9b2d7a5f3c8e1b4d6a9f
 
   frontend:
     runs-on: ubuntu-latest

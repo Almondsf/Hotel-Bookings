@@ -57,7 +57,7 @@ def generate_daily_tasks(day=None):
 
 
 def _lock(task):
-    return Task.objects.select_for_update().select_related('room').get(pk=task.pk)
+    return Task.objects.select_for_update(of=('self',)).select_related('room').get(pk=task.pk)
 
 
 def start_task(task, *, request):
