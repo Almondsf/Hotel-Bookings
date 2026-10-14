@@ -81,9 +81,9 @@ class StaffSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'phone', 'role',
-            'is_active', 'date_joined', 'last_login',
+            'is_active', 'date_joined', 'last_login', 'mfa_enabled',
         ]
-        read_only_fields = ['id', 'is_active', 'date_joined', 'last_login']
+        read_only_fields = ['id', 'is_active', 'date_joined', 'last_login', 'mfa_enabled']
         extra_kwargs = {'role': {'required': True}}
 
     def validate_email(self, value):

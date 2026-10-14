@@ -224,3 +224,8 @@ button.small, .button.small { padding: 4px 10px; font-size: 12.5px; }
   .card { box-shadow: none; break-inside: avoid; }
   .row-actions { display: none; }
 }
+
+/* Tab bar (settings) */
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 14px; color: var(--text-muted); }
+.tabs button.active { color: var(--text); border-bottom-color: var(--primary); font-weight: 600; }

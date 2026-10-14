@@ -1,7 +1,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type FormEvent } from 'react';
 
-import { api, post } from '../api/client';
+import { api, patch, post } from '../api/client';
 import type { AuditEntry, Paginated, StaffMember } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { Empty, ErrorAlert, Field, fieldError, Loading, Modal, PageHeader } from '../components/ui';
@@ -13,6 +13,15 @@ export function Staff() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [inviting, setInviting] = useState(false);
+  const [editing, setEditing] = useState<StaffMember | null>(null);
+  const [notice, setNotice] = useState('');
+  const action = useMutation({
+    mutationFn: ({ member, path }: { member: StaffMember; path: string }) => post<{ detail?: string }>(`staff/${member.id}/${path}/`),
+    onSuccess: (data, { member, path }) => {
+      setNotice(data?.detail ?? (path === 'resend-invite' ? `Invite re-sent to ${member.email}.` : `Two-factor reset for ${member.first_name}.`));
+      void queryClient.invalidateQueries({ queryKey: ['staff'] });
+    },
+  });
   const staff = useQuery({ queryKey: ['staff'], queryFn: () => api<Paginated<StaffMember>>('staff/') });
   const toggle = useMutation({
     mutationFn: (member: StaffMember) => post(`staff/${member.id}/${member.is_active ? 'deactivate' : 'reactivate'}/`),
@@ -22,7 +31,8 @@ export function Staff() {
     <div className="stack">
       <PageHeader title="Staff" subtitle="New staff receive an email to set their own password."
                   actions={<button className="primary" onClick={() => setInviting(true)}>Invite staff</button>} />
-      <ErrorAlert error={staff.error || toggle.error} />
+      {notice && <div className="alert success">{notice}</div>}
+      <ErrorAlert error={staff.error || toggle.error || action.error} />
       <div className="card table-wrap">
         {staff.isLoading ? <Loading /> : !staff.data?.results.length ? <Empty>No staff.</Empty> : (
           <table>
@@ -33,7 +43,14 @@ export function Staff() {
                   <td>{m.first_name} {m.last_name}</td><td>{m.email}</td><td>{humanize(m.role)}</td>
                   <td>{m.last_login ? formatDateTime(m.last_login) : <span className="muted">Invite pending</span>}</td>
                   <td>{m.is_active ? <span className="badge ok">Active</span> : <span className="badge">Deactivated</span>}</td>
-                  <td>{m.id !== user?.id && <button onClick={() => toggle.mutate(m)}>{m.is_active ? 'Deactivate' : 'Reactivate'}</button>}</td>
+                  <td className="row-actions">{m.id !== user?.id && <>
+                    <button className="small" onClick={() => setEditing(m)}>Edit</button>
+                    {m.is_active && !m.last_login && <button className="small" onClick={() => action.mutate({ member: m, path: 'resend-invite' })}>Resend invite</button>}
+                    {m.mfa_enabled && <button className="small" onClick={() => {
+                      if (window.confirm(`Reset two-factor sign-in for ${m.first_name}? They will set it up again at next sign-in.`)) action.mutate({ member: m, path: 'reset-mfa' });
+                    }}>Reset 2FA</button>}
+                    <button className="small" onClick={() => toggle.mutate(m)}>{m.is_active ? 'Deactivate' : 'Reactivate'}</button>
+                  </>}</td>
                 </tr>
               ))}
             </tbody>
@@ -41,7 +58,36 @@ export function Staff() {
         )}
       </div>
       {inviting && <InviteDialog onClose={() => setInviting(false)} />}
+      {editing && <EditStaffDialog member={editing} onClose={() => setEditing(null)} />}
     </div>
+  );
+}
+
+function EditStaffDialog({ member, onClose }: { member: StaffMember; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [form, setForm] = useState({ first_name: member.first_name, last_name: member.last_name, phone: member.phone, role: member.role });
+  const save = useMutation({
+    mutationFn: () => patch(`staff/${member.id}/`, form),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['staff'] }); onClose(); },
+  });
+  return (
+    <Modal title={`Edit ${member.first_name} ${member.last_name}`} onClose={onClose}>
+      <form className="stack" onSubmit={(e: FormEvent) => { e.preventDefault(); save.mutate(); }}>
+        <ErrorAlert error={save.error} />
+        <div className="form-grid">
+          <Field label="First name"><input required value={form.first_name} onChange={(e) => setForm({ ...form, first_name: e.target.value })} /></Field>
+          <Field label="Last name"><input required value={form.last_name} onChange={(e) => setForm({ ...form, last_name: e.target.value })} /></Field>
+          <Field label="Phone" error={fieldError(save.error, 'phone')}><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
+          <Field label="Role" hint="Changes what they can see and do" error={fieldError(save.error, 'role')}>
+            <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+              {ROLES.map((r) => <option key={r} value={r}>{humanize(r)}</option>)}
+            </select>
+          </Field>
+        </div>
+        <p className="muted" style={{ margin: 0 }}>Email: {member.email} (can't be changed here).</p>
+        <div className="actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={save.isPending}>Save</button></div>
+      </form>
+    </Modal>
   );
 }
 

@@ -1,4 +1,4 @@
-from rest_framework import generics
+from rest_framework import generics, serializers
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -32,6 +32,46 @@ class RoomCreateView(generics.CreateAPIView):
 
     def perform_create(self, serializer):
         record(AuditLog.Action.ROOM_CREATED, request=self.request, target=serializer.save())
+
+
+class RoomTypeUpdateView(generics.UpdateAPIView):
+    """PATCH a room type's description, base price, capacity or beds. Past bookings keep their agreed rates."""
+    serializer_class = RoomTypeSerializer
+    permission_classes = [HasCapability('rooms.manage')]
+    queryset = RoomType.objects.all()
+    http_method_names = ['patch', 'options']
+
+    def perform_update(self, serializer):
+        record(AuditLog.Action.ROOM_TYPE_UPDATED, request=self.request, target=serializer.save(),
+               changes={k: str(v) for k, v in serializer.validated_data.items()})
+
+
+class RoomUpdateSerializer(RoomSerializer):
+    # Occupancy follows check-in/out and MAINTENANCE follows maintenance tickets; staff here
+    # can only take a room out of service (e.g. renovation) or return it to sale.
+    status = serializers.ChoiceField(choices=[Room.Status.AVAILABLE, Room.Status.OUT_OF_SERVICE], required=False)
+
+    class Meta(RoomSerializer.Meta):
+        read_only_fields = RoomSerializer.Meta.read_only_fields + ['room_number', 'housekeeping_status']
+
+    def validate_status(self, value):
+        room = self.instance
+        if room.status in (Room.Status.OCCUPIED, Room.Status.MAINTENANCE) and value != room.status:
+            raise serializers.ValidationError(
+                f"Room {room.room_number} is {room.get_status_display().lower()}; that status is managed by "
+                "check-in/out and maintenance tickets.")
+        return value
+
+
+class RoomUpdateView(generics.UpdateAPIView):
+    serializer_class = RoomUpdateSerializer
+    permission_classes = [HasCapability('rooms.manage')]
+    queryset = Room.objects.select_related('room_type')
+    http_method_names = ['patch', 'options']
+
+    def perform_update(self, serializer):
+        record(AuditLog.Action.ROOM_UPDATED, request=self.request, target=serializer.save(),
+               changes={k: str(v) for k, v in serializer.validated_data.items()})
 
 
 class RoomTypeListView(generics.ListAPIView):

@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { Link, Navigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 
 import { useAuth } from '../auth/AuthContext';
 import { ErrorAlert, Field } from '../components/ui';
@@ -14,15 +14,24 @@ export function Login() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
-  if (user) return <Navigate to="/dashboard" replace />;
+  const navigate = useNavigate();
+  const notice = (useLocation().state as { notice?: string } | null)?.notice;
+  // With a notice we are mid sign-out (e.g. after a password change): stay here
+  if (user && !notice) return <Navigate to="/dashboard" replace />;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      if (ticket) await completeMfa(ticket, code, useRecovery);
-      else setTicket(await login(email, password));
+      if (ticket) {
+        await completeMfa(ticket, code, useRecovery);
+        navigate('/dashboard', { replace: true });
+      } else {
+        const next = await login(email, password);
+        setTicket(next);
+        if (!next) navigate('/dashboard', { replace: true });
+      }
     } catch (e) {
       setError(e);
     } finally {
@@ -37,6 +46,7 @@ export function Login() {
           <h1>Staff sign in</h1>
           <p className="muted" style={{ margin: 0 }}>Hotel property management</p>
         </div>
+        {notice && !error && <div className="alert success">{notice}</div>}
         <ErrorAlert error={error} />
         {ticket ? (
           <>

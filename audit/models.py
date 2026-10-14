@@ -24,6 +24,8 @@ class AuditLog(models.Model):
         STAFF_REACTIVATED = 'staff.reactivated', 'Staff reactivated'
         ROOM_TYPE_CREATED = 'rooms.room_type_created', 'Room type created'
         ROOM_CREATED = 'rooms.room_created', 'Room created'
+        ROOM_TYPE_UPDATED = 'rooms.room_type_updated', 'Room type updated'
+        ROOM_UPDATED = 'rooms.room_updated', 'Room updated'
         BOOKING_CREATED = 'bookings.created', 'Booking created'
         BOOKING_MODIFIED = 'bookings.modified', 'Booking modified'
         BOOKING_CHECKED_IN = 'bookings.checked_in', 'Guest checked in'

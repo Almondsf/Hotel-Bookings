@@ -3,7 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 
 import type { Capability } from './api/types';
 import { useAuth } from './auth/AuthContext';
-import { Layout, NAV } from './components/Layout';
+import { allows, Layout, NAV, SETTINGS_CAPABILITIES } from './components/Layout';
 import { Loading } from './components/ui';
 import { Login } from './pages/Login';
 import { ForgotPassword, SetPassword } from './pages/PasswordPages';
@@ -27,6 +27,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard').then((m) => ({ default:
 const FolioDetail = lazy(() => import('./pages/Folios').then((m) => ({ default: m.FolioDetail })));
 const Folios = lazy(() => import('./pages/Folios').then((m) => ({ default: m.Folios })));
 const Accounts = lazy(() => import('./pages/Accounts').then((m) => ({ default: m.Accounts })));
+const Settings = lazy(() => import('./pages/Settings').then((m) => ({ default: m.Settings })));
 const AccountDetail = lazy(() => import('./pages/Accounts').then((m) => ({ default: m.AccountDetail })));
 const GuestDetail = lazy(() => import('./pages/Guests').then((m) => ({ default: m.GuestDetail })));
 const Guests = lazy(() => import('./pages/Guests').then((m) => ({ default: m.Guests })));
@@ -47,9 +48,9 @@ function RequireAuth({ children }: { children: ReactNode }) {
   return user ? <>{children}</> : <Navigate to="/login" replace />;
 }
 
-function Guard({ capability, children }: { capability: Capability; children: ReactNode }) {
+function Guard({ capability, children }: { capability: Capability | Capability[]; children: ReactNode }) {
   const { can } = useAuth();
-  return can(capability) ? <>{children}</> : <div className="empty">You don't have access to this page.</div>;
+  return allows(can, capability) ? <>{children}</> : <div className="empty">You don't have access to this page.</div>;
 }
 
 /** Send each role to its first page: front desk to the dashboard, housekeeping to their task list, etc. */
@@ -58,7 +59,7 @@ function Home() {
   // Staff whose role requires two-factor sign-in land on enrolment until it's done
   if (user?.mfa_required && !user.mfa_enabled && !user.capabilities.length) return <Navigate to="/account" replace />;
   if (can('bookings.view')) return <Dashboard />;
-  const first = NAV.find((item) => item.to !== '/dashboard' && can(item.capability));
+  const first = NAV.find((item) => item.to !== '/dashboard' && allows(can, item.capability));
   return first ? <Navigate to={first.to} replace /> : <div className="empty">Your account has no pages assigned yet.</div>;
 }
 
@@ -94,6 +95,7 @@ export function App() {
         <Route path="night-audit" element={<Guard capability="night_audit.run"><NightAudit /></Guard>} />
         <Route path="channels" element={<Guard capability="bookings.view"><Channels /></Guard>} />
         <Route path="account" element={<Account />} />
+        <Route path="settings" element={<Guard capability={SETTINGS_CAPABILITIES}><Settings /></Guard>} />
         <Route path="staff" element={<Guard capability="staff.manage"><Staff /></Guard>} />
         <Route path="audit" element={<Guard capability="audit.view"><AuditLog /></Guard>} />
         <Route path="*" element={<div className="empty">Page not found.</div>} />

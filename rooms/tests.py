@@ -218,3 +218,43 @@ class RoomApiTests(APITestCase):
         })
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(response.data['room_type_detail']['name'], 'Standard')
+
+
+class RoomEditingTests(APITestCase):
+    def setUp(self):
+        self.room_type = make_room_type('Deluxe', '150000')
+        self.room = Room.objects.create(room_number='201', room_type=self.room_type, floor_number=2)
+        self.manager = User.objects.create_user('manager@example.com', 'Man', 'Ager', 'pw', role='manager')
+        self.client.force_authenticate(self.manager)
+
+    def test_manager_changes_room_type_price_and_it_is_audited(self):
+        url = reverse('room-type-update', args=[self.room_type.pk])
+        response = self.client.patch(url, {'base_price': '165000.00', 'description': 'Renovated'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.room_type.refresh_from_db()
+        self.assertEqual(self.room_type.base_price, Decimal('165000.00'))
+        self.assertTrue(AuditLog.objects.filter(action=AuditLog.Action.ROOM_TYPE_UPDATED, actor=self.manager).exists())
+
+    def test_receptionist_cannot_edit_rooms(self):
+        self.client.force_authenticate(User.objects.create_user('desk@example.com', 'De', 'Sk', 'pw', role='receptionist'))
+        self.assertEqual(self.client.patch(reverse('room-type-update', args=[self.room_type.pk]),
+                                           {'base_price': '1.00'}, format='json').status_code, 403)
+        self.assertEqual(self.client.patch(reverse('room-update', args=[self.room.pk]),
+                                           {'status': 'OUT_OF_SERVICE'}, format='json').status_code, 403)
+
+    def test_room_can_be_taken_out_of_service_and_back(self):
+        url = reverse('room-update', args=[self.room.pk])
+        self.assertEqual(self.client.patch(url, {'status': 'OUT_OF_SERVICE', 'notes': 'Renovation'}, format='json').status_code, 200)
+        self.room.refresh_from_db()
+        self.assertEqual((self.room.status, self.room.notes), ('OUT_OF_SERVICE', 'Renovation'))
+        self.assertEqual(self.client.patch(url, {'status': 'AVAILABLE'}, format='json').status_code, 200)
+
+    def test_occupancy_and_maintenance_are_not_editable_here(self):
+        url = reverse('room-update', args=[self.room.pk])
+        self.assertEqual(self.client.patch(url, {'status': 'OCCUPIED'}, format='json').status_code, 400)
+        Room.objects.filter(pk=self.room.pk).update(status=Room.Status.OCCUPIED)
+        response = self.client.patch(url, {'status': 'OUT_OF_SERVICE'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.client.patch(url, {'room_number': '999'}, format='json').status_code, 200)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.room_number, '201')  # room numbers are fixed once created

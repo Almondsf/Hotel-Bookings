@@ -175,6 +175,7 @@ export interface StaffMember {
   role: string;
   is_active: boolean;
   last_login: string | null;
+  mfa_enabled?: boolean;
 }
 
 export interface AuditEntry {

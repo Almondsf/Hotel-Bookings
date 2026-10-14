@@ -6,7 +6,14 @@ import { useAuth } from '../auth/AuthContext';
 import { humanize } from '../lib/format';
 import { Loading } from './ui';
 
-export const NAV: { to: string; label: string; capability: Capability }[] = [
+type Need = Capability | Capability[];
+
+/** True when the user has the capability, or any of them for a list. */
+export const allows = (can: (c: Capability) => boolean, need: Need) => (Array.isArray(need) ? need.some(can) : can(need));
+
+export const SETTINGS_CAPABILITIES: Capability[] = ['rooms.manage', 'rates.manage', 'pos.manage', 'billing.configure'];
+
+export const NAV: { to: string; label: string; capability: Need }[] = [
   { to: '/dashboard', label: 'Dashboard', capability: 'bookings.view' },
   { to: '/room-board', label: 'Room board', capability: 'bookings.view' },
   { to: '/reservations', label: 'Reservations', capability: 'bookings.view' },
@@ -20,6 +27,7 @@ export const NAV: { to: string; label: string; capability: Capability }[] = [
   { to: '/reports', label: 'Reports', capability: 'reports.view' },
   { to: '/night-audit', label: 'Night audit', capability: 'night_audit.run' },
   { to: '/channels', label: 'Online channels', capability: 'rates.manage' },
+  { to: '/settings', label: 'Settings', capability: SETTINGS_CAPABILITIES },
   { to: '/staff', label: 'Staff', capability: 'staff.manage' },
   { to: '/audit', label: 'Audit log', capability: 'audit.view' },
 ];
@@ -31,7 +39,7 @@ export function Layout() {
       <aside className="sidebar">
         <div className="brand">Hotel <span>PMS</span></div>
         <nav aria-label="Main">
-          {NAV.filter((item) => can(item.capability)).map((item) => (
+          {NAV.filter((item) => allows(can, item.capability)).map((item) => (
             <NavLink key={item.to} to={item.to} end={item.to === '/dashboard' || item.to === '/reservations'}>
               {item.label}
             </NavLink>
