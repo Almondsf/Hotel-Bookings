@@ -84,9 +84,16 @@ test('bill a company, see it on the statement and record its payment', async ({ 
 test('open an invoice PDF in a new tab', async ({ page }) => {
   await page.goto('/folios?status=SETTLED');
   await page.locator('tbody a[href^="/folios/"]').first().click();
-  const [tab] = await Promise.all([page.waitForEvent('popup'), page.getByRole('button', { name: 'Open PDF' }).first().click()]);
-  // The tab opens at once (so pop-up blockers allow it) and the PDF loads into it when ready
-  await expect.poll(() => tab.url()).toMatch(/^blob:/);
+  // A tab opens during the click (so pop-up blockers allow it) and the PDF is fetched with the
+  // staff session. Browsers with a PDF viewer show it there; headless test browsers download it.
+  const [tab, pdf] = await Promise.all([
+    page.waitForEvent('popup'),
+    page.waitForResponse((r) => /\/invoices\/\d+\/pdf\/$/.test(new URL(r.url()).pathname)),
+    page.getByRole('button', { name: 'Open PDF' }).first().click(),
+  ]);
+  expect(tab).toBeTruthy();
+  expect(pdf.status()).toBe(200);
+  expect(pdf.headers()['content-type']).toContain('application/pdf');
 });
 
 test('add a company account', async ({ page }) => {

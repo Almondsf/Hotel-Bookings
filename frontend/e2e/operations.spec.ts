@@ -9,10 +9,11 @@ test('housekeeping: generate the list, start and finish a task, skip one, inspec
   const startable = tasks.filter({ has: page.getByRole('button', { name: 'Start' }) }).first();
   const room = (await startable.locator('td strong').first().textContent())!.trim();
   await startable.getByRole('button', { name: 'Start' }).click();
-  const row = tasks.filter({ hasText: room }).first();
-  await expect(row.locator('.badge', { hasText: 'In progress' })).toBeVisible();
-  await row.getByRole('button', { name: 'Done' }).click();
-  await expect(row.locator('.badge', { hasText: 'Done' })).toBeVisible();
+  // A room can have more than one task today, so pick the row that is now in progress
+  const started = tasks.filter({ hasText: room }).filter({ has: page.locator('.badge', { hasText: 'In progress' }) }).first();
+  await expect(started).toBeVisible();
+  await started.getByRole('button', { name: 'Done' }).click();
+  await expect(tasks.filter({ hasText: room }).filter({ has: page.locator('.badge', { hasText: 'Done' }) }).first()).toBeVisible();
 
   const skippable = tasks.filter({ has: page.getByRole('button', { name: 'Skip' }) }).first();
   if (await skippable.count()) {
