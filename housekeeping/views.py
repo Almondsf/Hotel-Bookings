@@ -10,6 +10,7 @@ from booking.models import Booking
 from booking.staff_views import parse_date_param
 from hotel.clock import business_date
 from rooms.models import Room
+from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
 from . import services
 from .models import HousekeepingTask
@@ -27,7 +28,7 @@ class TaskSerializer(serializers.ModelSerializer):
                   'is_rush', 'assigned_to', 'assigned_to_name', 'notes', 'started_at', 'completed_at']
         read_only_fields = ['id', 'room', 'date', 'task_type', 'status', 'is_rush', 'started_at', 'completed_at']
 
-    def get_assigned_to_name(self, obj):
+    def get_assigned_to_name(self, obj) -> str | None:
         return obj.assigned_to.full_name if obj.assigned_to_id else None
 
     def validate_assigned_to(self, user):
@@ -107,6 +108,7 @@ class RoomStatusView(APIView):
     def get_permissions(self):
         return [HasCapability('housekeeping.view' if self.request.method == 'GET' else 'housekeeping.manage')()]
 
+    @extend_schema(summary="Rooms' cleaning and occupancy status", responses=ANY)
     def get(self, request):
         in_house = set(Booking.objects.filter(status=Booking.Status.CHECKED_IN).values_list('room_id', flat=True))
         today_tasks = HousekeepingTask.objects.filter(date=business_date())
@@ -120,6 +122,7 @@ class RoomStatusView(APIView):
             'tasks': [{'id': t.pk, 'task_type': t.task_type, 'status': t.status} for t in room.today_tasks],
         } for room in rooms])
 
+    @extend_schema(summary="Set a room's cleaning status", request=RoomStatusSerializer, responses=ANY)
     def post(self, request, room_id):
         room = Room.objects.filter(pk=room_id).first()
         if room is None:
@@ -135,6 +138,7 @@ class HousekeepingStaffView(APIView):
     """Attendants tasks can be assigned to."""
     permission_classes = [HasCapability('housekeeping.manage')]
 
+    @extend_schema(summary='Staff who can be assigned cleaning tasks', responses=ANY)
     def get(self, request):
         staff = User.objects.filter(is_active=True, role__in=[User.Role.HOUSEKEEPING, User.Role.MANAGER])
         return Response([{'id': u.pk, 'name': u.full_name, 'role': u.role} for u in staff.order_by('first_name')])

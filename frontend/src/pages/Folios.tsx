@@ -82,8 +82,9 @@ export function Folios() {
   );
 }
 
-type Dialog = 'charge' | 'payment' | 'refund' | 'company' | 'link'
-  | { voidCharge: number } | { voidPayment: number } | { moveCharge: number } | null;
+type Dialog = 'charge' | 'payment' | 'refund' | 'company' | 'link' | 'discount'
+  | { voidCharge: number } | { voidPayment: number } | { moveCharge: number }
+  | { cardRefund: { transactionId: number; gateway: string; refundable: number } } | null;
 
 export function FolioDetail() {
   const { id } = useParams();
@@ -93,6 +94,7 @@ export function FolioDetail() {
   const folio = useQuery({ queryKey: ['folio', id], queryFn: () => api<Folio>(`billing/folios/${id}/`) });
   const hotel = useQuery({ queryKey: ['hotel'], queryFn: () => api<{ payment_gateways: string[] }>('hotel/'), staleTime: 3_600_000 });
   const online = !!hotel.data?.payment_gateways.length;
+  const pdf = useMutation({ mutationFn: (invoiceId: number) => openFile(`/api/billing/invoices/${invoiceId}/pdf/`) });
 
   const mutate = useMutation({
     mutationFn: ({ path, body }: { path: string; body?: unknown }) => post(`billing/folios/${id}/${path}`, body),
@@ -119,6 +121,7 @@ export function FolioDetail() {
           {f.account && <> · billed to {f.account}</>}</>}
         actions={<>
           {open && can('folios.post') && <button onClick={() => setDialog('charge')}>Post charge</button>}
+          {open && can('folios.adjust') && <button onClick={() => setDialog('discount')}>Discount</button>}
           {open && balance > 0 && online && can('payments.take') && <button onClick={() => setDialog('link')}>Payment link</button>}
           {open && balance > 0 && can('accounts.manage') && <button onClick={() => setDialog('company')}>Bill to company</button>}
           {open && balance < 0 && can('payments.refund') && <button onClick={() => setDialog('refund')}>Refund {formatMoney(-balance)}</button>}
@@ -127,7 +130,7 @@ export function FolioDetail() {
           <button onClick={() => window.print()}>Print</button>
         </>}
       />
-      {!dialog && <ErrorAlert error={mutate.error} />}
+      {!dialog && <ErrorAlert error={mutate.error ?? pdf.error} />}
       <div className="grid stats">
         <div className="card stat"><div className="label">Charges</div><div className="value">{formatMoney(f.charges_total)}</div></div>
         <div className="card stat"><div className="label">Paid</div><div className="value">{formatMoney(f.payments_total)}</div></div>
@@ -168,8 +171,13 @@ export function FolioDetail() {
                     {p.tendered_currency && <div className="muted" style={{ fontSize: 12 }}>{p.tendered_amount} {p.tendered_currency}</div>}</td>
                   <td>{p.reference || '—'}</td><td>{p.received_by ?? 'Online'}</td>
                   <td className="num">{p.kind === 'REFUND' ? '−' : ''}{formatMoney(p.amount)}</td>
-                  <td className="row-actions">{open && !p.is_void && can('folios.adjust') &&
-                    <button className="small" onClick={() => setDialog({ voidPayment: p.id })}>Void</button>}</td>
+                  <td className="row-actions">
+                    {open && !p.is_void && p.kind === 'PAYMENT' && p.online && Number(p.online.refundable) > 0 && balance < 0 && can('payments.refund') &&
+                      <button className="small" onClick={() => setDialog({ cardRefund: {
+                        transactionId: p.online!.transaction_id, gateway: p.online!.gateway, refundable: Number(p.online!.refundable) } })}>Refund to card</button>}
+                    {open && !p.is_void && !p.online && can('folios.adjust') &&
+                      <button className="small" onClick={() => setDialog({ voidPayment: p.id })}>Void</button>}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -183,7 +191,7 @@ export function FolioDetail() {
             <div className="row" key={inv.id}>
               <strong>{inv.number}</strong><span className="muted">{formatDateTime(inv.issued_at)}</span>
               <span>{formatMoney(inv.total)}</span>
-              <button onClick={() => void openFile(`/api/billing/invoices/${inv.id}/pdf/`)}>Open PDF</button>
+              <button onClick={() => pdf.mutate(inv.id)}>Open PDF</button>
             </div>
           ))}
         </div>
@@ -194,6 +202,10 @@ export function FolioDetail() {
       {dialog === 'refund' && <RefundDialog credit={-balance} busy={mutate.isPending} error={mutate.error} onClose={close} onSubmit={run('refunds/')} />}
       {dialog === 'company' && <CompanyDialog balance={balance} busy={mutate.isPending} error={mutate.error} onClose={close} onSubmit={run('transfer-to-account/')} />}
       {dialog === 'link' && <PaymentLinkDialog folio={f} onClose={close} />}
+      {dialog === 'discount' && <DiscountDialog busy={mutate.isPending} error={mutate.error} onClose={close} onSubmit={run('charges/')} />}
+      {dialog && typeof dialog === 'object' && 'cardRefund' in dialog && (
+        <CardRefundDialog {...dialog.cardRefund} credit={-balance} onClose={close} />
+      )}
       {dialog && typeof dialog === 'object' && 'voidCharge' in dialog && (
         <ReasonDialog title="Void charge" busy={mutate.isPending} error={mutate.error} onClose={close}
                       onSubmit={(reason) => mutate.mutate({ path: `charges/${dialog.voidCharge}/void/`, body: { reason } })} />
@@ -409,6 +421,55 @@ export function ReasonDialog({ title, busy, error, onClose, onSubmit }: { title:
         <ErrorAlert error={error} />
         <Field label="Reason" hint="Recorded in the audit log"><input required value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
         <div className="actions"><button type="button" onClick={onClose}>Cancel</button><button className="danger" disabled={busy}>{title}</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+/** A reduction on the bill (allowance): posted as a negative charge, taxes reduced to match. */
+function DiscountDialog({ busy, error, onClose, onSubmit }: DialogProps) {
+  const [amount, setAmount] = useState('');
+  const [reason, setReason] = useState('');
+  return (
+    <Modal title="Give a discount" onClose={onClose}>
+      <form className="stack" onSubmit={(e) => {
+        e.preventDefault();
+        onSubmit({ category: 'ALLOWANCE', description: `Discount: ${reason}`, unit_price: (-Math.abs(Number(amount))).toFixed(2), quantity: '1' });
+      }}>
+        <ErrorAlert error={error} />
+        <p className="muted" style={{ margin: 0 }}>Taken off the bill before tax; the VAT and levies on it are reduced too. Recorded in the audit log.</p>
+        <Field label="Amount off (₦, before tax)" error={fieldError(error, 'unit_price')}>
+          <input type="number" step="0.01" min="0.01" required value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </Field>
+        <Field label="Reason" hint="e.g. AC fault in room, loyal guest, manager's goodwill"><input required value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+        <div className="actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>Apply discount</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+/** Send money back to the card or account an online payment came from (needs the guest to be in credit). */
+function CardRefundDialog({ transactionId, gateway, refundable, credit, onClose }: {
+  transactionId: number; gateway: string; refundable: number; credit: number; onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const max = Math.min(refundable, credit);
+  const [amount, setAmount] = useState(max.toFixed(2));
+  const [reason, setReason] = useState('');
+  const refund = useMutation({
+    mutationFn: () => post(`payments/transactions/${transactionId}/refund/`, { amount, reason }),
+    onSuccess: () => { for (const key of ['folio', 'folios', 'reservation']) void queryClient.invalidateQueries({ queryKey: [key] }); onClose(); },
+  });
+  return (
+    <Modal title={`Refund to card via ${humanize(gateway)}`} onClose={onClose}>
+      <form className="stack" onSubmit={(e) => { e.preventDefault(); refund.mutate(); }}>
+        <ErrorAlert error={refund.error} />
+        <p className="muted" style={{ margin: 0 }}>The money goes back to the card or account the guest paid with. It usually reaches them in a few working days.</p>
+        <Field label="Amount (₦)" hint={`Up to ${formatMoney(max)}`} error={fieldError(refund.error, 'amount')}>
+          <input type="number" step="0.01" min="0.01" max={max} required value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </Field>
+        <Field label="Reason" hint="Recorded in the audit log"><input required value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+        <div className="actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={refund.isPending}>Refund {formatMoney(Number(amount) || 0)}</button></div>
       </form>
     </Modal>
   );

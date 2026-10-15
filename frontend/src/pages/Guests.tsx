@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
-import { api, openFile, patch, post } from '../api/client';
+import { api, downloadFile, patch, post } from '../api/client';
 import type { Guest, Paginated } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { Empty, ErrorAlert, Field, Loading, PageHeader, StatusBadge } from '../components/ui';
@@ -68,6 +68,7 @@ export function GuestDetail() {
     onSuccess: () => { setNotes(null); void queryClient.invalidateQueries({ queryKey: ['guest', id] }); },
   });
   const navigate = useNavigate();
+  const exportData = useMutation({ mutationFn: () => downloadFile(`/api/privacy/guests/${id}/export/`, `guest-${id}-data.json`) });
   const erase = useMutation({
     mutationFn: () => post(`privacy/guests/${id}/anonymise/`, { reason: 'Guest request (NDPA)' }),
     onSuccess: () => navigate('/guests'),
@@ -90,13 +91,13 @@ export function GuestDetail() {
                       <button onClick={() => save.mutate({ is_vip: !g.is_vip })}>{g.is_vip ? 'Remove VIP' : 'Mark VIP'}</button>
                     )}
                     {can('privacy.manage') && <>
-                      <button onClick={() => void openFile(`/api/privacy/guests/${id}/export/`)}>Export data</button>
+                      <button disabled={exportData.isPending} onClick={() => exportData.mutate()}>Export data</button>
                       <button className="danger" onClick={() => {
                         if (window.confirm("Erase this guest's personal data? Bookings and invoices are kept without their details. This cannot be undone.")) erase.mutate();
                       }}>Erase personal data</button>
                     </>}
                   </>} />
-      <ErrorAlert error={save.error || reveal.error || erase.error} />
+      <ErrorAlert error={save.error || reveal.error || erase.error || exportData.error} />
       <div className="grid cols-2">
         <div className="card">
           <h2>Profile</h2>

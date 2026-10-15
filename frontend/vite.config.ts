@@ -10,5 +10,6 @@ export default defineConfig({
     port: 3000,
     proxy: { '/api': process.env.API_TARGET ?? 'http://127.0.0.1:8000' },
   },
-  test: { environment: 'jsdom' },
+  // Browser tests in e2e/ run with Playwright (npm run e2e), not Vitest
+  test: { environment: 'jsdom', include: ['src/**/*.test.{ts,tsx}'] },
 });

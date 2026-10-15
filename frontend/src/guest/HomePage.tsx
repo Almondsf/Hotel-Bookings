@@ -65,12 +65,12 @@ export function BookingBar({ defaultAdults = 2 }: { defaultAdults?: number }) {
       </Field>
       <Field label="Adults">
         <select value={form.adults} onChange={(e) => setForm({ ...form, adults: e.target.value })}>
-          {[1, 2, 3, 4].map((n) => <option key={n}>{n}</option>)}
+          {Array.from({ length: 30 }, (_, i) => i + 1).map((n) => <option key={n}>{n}</option>)}
         </select>
       </Field>
       <Field label="Children">
         <select value={form.children} onChange={(e) => setForm({ ...form, children: e.target.value })}>
-          {[0, 1, 2, 3].map((n) => <option key={n}>{n}</option>)}
+          {Array.from({ length: 11 }, (_, i) => i).map((n) => <option key={n}>{n}</option>)}
         </select>
       </Field>
       <button className="primary guest-cta">Check availability</button>

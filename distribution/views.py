@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from authentication.permissions import HasCapability
+from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
 from . import services
 from .models import ChannelBooking
@@ -21,6 +22,7 @@ class ChannexWebhookView(APIView):
     authentication_classes = []
     throttle_classes = []
 
+    @extend_schema(summary='Channel manager webhook (shared secret)', request=ANY, responses=ANY)
     def post(self, request):
         connection = services.active_connection()
         secret = request.headers.get('X-Webhook-Secret', '')
@@ -43,6 +45,7 @@ class ChannelStatusView(APIView):
     """Connection health and OTA bookings that need a person (rooms to find, in-house changes)."""
     permission_classes = [HasCapability('bookings.view')]
 
+    @extend_schema(summary='Channel connection status and bookings needing attention', responses=ANY)
     def get(self, request):
         connection = services.active_connection()
         attention = ChannelBooking.objects.filter(status=ChannelBooking.Status.NEEDS_ATTENTION).prefetch_related('bookings')
@@ -61,6 +64,7 @@ class ChannelSyncView(APIView):
     """Republish everything now (e.g. after changing rates)."""
     permission_classes = [HasCapability('rates.manage')]
 
+    @extend_schema(summary='Push availability and rates and pull bookings now', request=None, responses=ANY)
     def post(self, request):
         if services.active_connection() is None:
             return Response({'error': 'No channel manager is connected.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -73,6 +77,7 @@ class ResolveChannelBookingView(APIView):
     """Mark a flagged OTA booking as handled once staff have placed or moved it by hand."""
     permission_classes = [HasCapability('bookings.manage')]
 
+    @extend_schema(summary='Mark a flagged channel booking as handled', request=ANY, responses=ANY)
     def post(self, request, pk):
         updated = ChannelBooking.objects.filter(pk=pk, status=ChannelBooking.Status.NEEDS_ATTENTION).update(
             status=ChannelBooking.Status.IMPORTED, problem=f"Resolved by {request.user.email}")

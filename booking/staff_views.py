@@ -12,6 +12,7 @@ from audit.services import record
 from authentication.permissions import HasCapability
 from hotel.clock import business_date
 from rooms.models import Room
+from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
 from . import lifecycle
 from .front_desk import room_board, walk_in
@@ -257,6 +258,7 @@ class WalkInView(APIView):
     """Book and check in an arriving guest in one step."""
     permission_classes = [HasCapability('bookings.manage')]
 
+    @extend_schema(summary='Book and check in an arriving guest', request=WalkInSerializer, responses=ReservationSerializer)
     def post(self, request):
         serializer = WalkInSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -276,5 +278,6 @@ class RoomBoardView(APIView):
     """Every room and what's happening in it on ?date= (default today)."""
     permission_classes = [HasCapability('bookings.view')]
 
+    @extend_schema(summary='Every room and what is happening in it', parameters=[query('date', 'Day to show (YYYY-MM-DD); default today')], responses=ANY)
     def get(self, request):
         return Response(room_board(parse_date_param(request.query_params, 'date')))

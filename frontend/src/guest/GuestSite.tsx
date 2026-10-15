@@ -23,6 +23,27 @@ interface RoomOffer {
   size: number; primary_image: string | null; rate_plans: RatePlanOffer[];
 }
 
+interface GroupPlan {
+  label: string;
+  rooms: { room_type_id: number; room_type_name: string; primary_image: string | null; number_of_adults: number; number_of_children: number }[];
+  total_price: string; taxes: string; total_with_taxes: string; price_per_night: string;
+}
+
+interface SearchResults { room_types: RoomOffer[]; group_plans: GroupPlan[] | null; other_room_types: RoomOffer[] | null }
+
+/** A group plan travels to checkout in the URL as "roomTypeId:adults:children,…". */
+const encodePlan = (plan: GroupPlan) => plan.rooms.map((r) => `${r.room_type_id}:${r.number_of_adults}:${r.number_of_children}`).join(',');
+function decodePlan(value: string | null) {
+  if (!value) return null;
+  const rooms = value.split(',').map((part) => part.split(':').map(Number))
+    .filter((n) => n.length === 3 && n.every(Number.isFinite))
+    .map(([room_type, number_of_adults, number_of_children]) => ({ room_type, number_of_adults, number_of_children }));
+  return rooms.length >= 2 ? rooms : null;
+}
+
+const party = (adults: number | string, children: number | string) =>
+  `${adults} adult${Number(adults) === 1 ? '' : 's'}${Number(children) ? `, ${children} child${Number(children) === 1 ? '' : 'ren'}` : ''}`;
+
 interface Confirmation {
   confirmation_number: string; status: string; room_type_name: string; check_in_date: string; check_out_date: string;
   total_with_taxes: string; cancellation_policy: string; cancellation_fee_if_cancelled_now: string | null;
@@ -106,7 +127,7 @@ export function SearchPage() {
   const query = Object.fromEntries(params.entries());
   const results = useQuery({
     queryKey: ['guest-search', query],
-    queryFn: () => api<{ room_types: RoomOffer[]; booking_plans: unknown }>('rooms/search/', { query }),
+    queryFn: () => api<SearchResults>('rooms/search/', { query }),
     enabled: searched,
   });
 
@@ -125,7 +146,7 @@ export function SearchPage() {
                                         onChange={(e) => setForm({ ...form, check_in: e.target.value, check_out: e.target.value >= form.check_out ? addDays(e.target.value, 1) : form.check_out })} /></Field>
           <Field label="Departure"><input type="date" required min={addDays(form.check_in, 1)} value={form.check_out}
                                           onChange={(e) => setForm({ ...form, check_out: e.target.value })} /></Field>
-          <Field label="Adults"><input type="number" min={1} max={10} value={form.adults} onChange={(e) => setForm({ ...form, adults: e.target.value })} /></Field>
+          <Field label="Adults"><input type="number" min={1} max={30} value={form.adults} onChange={(e) => setForm({ ...form, adults: e.target.value })} /></Field>
           <Field label="Children"><input type="number" min={0} max={10} value={form.children} onChange={(e) => setForm({ ...form, children: e.target.value })} /></Field>
           <Field label="Promo code"><input value={form.promo_code} onChange={(e) => setForm({ ...form, promo_code: e.target.value })} /></Field>
           <button className="primary guest-cta">Check availability</button>
@@ -135,43 +156,93 @@ export function SearchPage() {
         <section className="stack">
           <ErrorAlert error={results.error} />
           {results.isLoading && <Loading />}
-          {results.data && !results.data.room_types.length && (
+          {results.data && !results.data.room_types.length && !results.data.group_plans?.length && (
             <div className="card guest-empty">
-              No single room fits {params.get('adults')} adult(s){Number(params.get('children')) ? ` and ${params.get('children')} child(ren)` : ''} on these dates.
-              Try different dates, or contact us to book several rooms together.
+              No single room fits {party(params.get('adults') ?? 1, params.get('children') ?? 0)} on these dates, and there aren't
+              enough rooms free to put the group together. Try different dates, or contact us.
             </div>
           )}
-          {results.data?.room_types.map((room) => (
-            <article className="card guest-room" key={room.id}>
-              {room.primary_image ? <img src={room.primary_image} alt={room.name} loading="lazy" />
-                : <div className="guest-room-placeholder" aria-hidden="true" />}
-              <div className="stack" style={{ gap: 10 }}>
-                <div>
-                  <h2 style={{ margin: 0 }}>{room.name}</h2>
-                  <div className="muted">{room.size} sq ft · {room.bed_type.toLowerCase()} bed · up to {room.max_adults} adults{room.max_children ? `, ${room.max_children} children` : ''}</div>
-                </div>
-                <p style={{ margin: 0 }}>{room.description}</p>
-                {room.rate_plans.length === 0 && <div className="muted">Not available to book online for these dates.</div>}
-                {room.rate_plans.map((plan) => (
-                  <div className="guest-rate" key={plan.code}>
-                    <div>
-                      <strong>{plan.name}</strong>
-                      <div className="muted" style={{ fontSize: 13 }}>{plan.meal_plan_name} · {plan.is_refundable ? 'Free cancellation available' : 'Non-refundable'}</div>
-                    </div>
-                    <div className="guest-price">
+          {!!results.data?.group_plans?.length && (
+            <section className="stack" aria-label="Plans for your group">
+              <div>
+                <h2 style={{ margin: 0 }}>Plans for your group</h2>
+                <p className="muted" style={{ margin: '4px 0 0' }}>
+                  {party(params.get('adults') ?? 1, params.get('children') ?? 0)} is more than one room sleeps, so here are rooms that
+                  fit everyone, booked together in one go. Split the rooms however you like.
+                </p>
+              </div>
+              <div className="guest-plans">
+                {results.data.group_plans.map((plan) => (
+                  <article className="card guest-plan" key={plan.label}>
+                    <span className="home-badge">{plan.label}</span>
+                    <strong>{plan.rooms.length} rooms</strong>
+                    <ul>{plan.rooms.map((r, i) => <li key={i}>{r.room_type_name} <span className="muted">· {party(r.number_of_adults, r.number_of_children)}</span></li>)}</ul>
+                    <div className="guest-price" style={{ alignItems: 'flex-start' }}>
                       <strong>{formatMoney(plan.total_with_taxes)}</strong>
-                      <span className="muted">{stay} night{stay === 1 ? '' : 's'}, incl. taxes</span>
+                      <span className="muted">{stay} night{stay === 1 ? '' : 's'} for everyone, incl. taxes</span>
                     </div>
-                    <button className="primary" onClick={() => navigate(`/book/checkout?${new URLSearchParams({ ...query, room_type: String(room.id), rate_plan: plan.code })}`)}>
-                      Select</button>
-                  </div>
+                    <button className="primary" onClick={() => navigate(`/book/checkout?${new URLSearchParams({ ...query, plan: encodePlan(plan) })}`)}>
+                      Book this plan</button>
+                  </article>
                 ))}
               </div>
-            </article>
+            </section>
+          )}
+          {results.data && results.data.room_types.length > 1 && (
+            <p className="muted" style={{ margin: 0 }}>Best fit for your party first, then the lowest price.</p>
+          )}
+          {results.data?.room_types.map((room, index) => (
+            <RoomOfferCard key={room.id} room={room} stay={stay} best={index === 0 && results.data!.room_types.length > 1}
+                           onSelect={(plan) => navigate(`/book/checkout?${new URLSearchParams({ ...query, room_type: String(room.id), rate_plan: plan })}`)} />
           ))}
+          {!!results.data?.other_room_types?.length && (
+            <section className="stack" aria-label="All rooms">
+              <div>
+                <h2 style={{ margin: 0 }}>Or browse our rooms</h2>
+                <p className="muted" style={{ margin: '4px 0 0' }}>Each of these sleeps part of your group. Book one on its own, or ask us to arrange a different mix.</p>
+              </div>
+              {results.data.other_room_types.map((room) => (
+                <RoomOfferCard key={room.id} room={room} stay={stay}
+                               onSelect={(plan) => navigate(`/book/checkout?${new URLSearchParams({
+                                 ...query, room_type: String(room.id), rate_plan: plan,
+                                 adults: String(Math.min(Number(params.get('adults') ?? 1), room.max_adults)),
+                                 children: String(Math.min(Number(params.get('children') ?? 0), room.max_children)) })}`)} />
+              ))}
+            </section>
+          )}
         </section>
       )}
     </GuestLayout>
+  );
+}
+
+function RoomOfferCard({ room, stay, best = false, onSelect }: { room: RoomOffer; stay: number; best?: boolean; onSelect: (ratePlan: string) => void }) {
+  return (
+    <article className="card guest-room">
+      {room.primary_image ? <img src={room.primary_image} alt={room.name} loading="lazy" />
+        : <div className="guest-room-placeholder" aria-hidden="true" />}
+      <div className="stack" style={{ gap: 10 }}>
+        <div>
+          <h2 style={{ margin: 0 }}>{room.name}{best && <span className="home-badge">Best match</span>}</h2>
+          <div className="muted">{room.size} sq ft · {room.bed_type.toLowerCase()} bed · up to {room.max_adults} adults{room.max_children ? `, ${room.max_children} children` : ''}</div>
+        </div>
+        <p style={{ margin: 0 }}>{room.description}</p>
+        {room.rate_plans.length === 0 && <div className="muted">Not available to book online for these dates.</div>}
+        {room.rate_plans.map((plan) => (
+          <div className="guest-rate" key={plan.code}>
+            <div>
+              <strong>{plan.name}</strong>
+              <div className="muted" style={{ fontSize: 13 }}>{plan.meal_plan_name} · {plan.is_refundable ? 'Free cancellation available' : 'Non-refundable'}</div>
+            </div>
+            <div className="guest-price">
+              <strong>{formatMoney(plan.total_with_taxes)}</strong>
+              <span className="muted">{stay} night{stay === 1 ? '' : 's'}, incl. taxes</span>
+            </div>
+            <button className="primary" onClick={() => onSelect(plan.code)}>Select</button>
+          </div>
+        ))}
+      </div>
+    </article>
   );
 }
 
@@ -184,8 +255,14 @@ export function CheckoutPage() {
   const [agreed, setAgreed] = useState(false);
   useEffect(() => { if (hotel.data && !gateway) setGateway(hotel.data.payment_gateways[0] ?? ''); }, [hotel.data, gateway]);
 
+  const plan = decodePlan(params.get('plan'));
+  const roomTypes = useQuery({ queryKey: ['room-types'], queryFn: () => api<{ id: number; name: string }[]>('rooms/types/'), enabled: !!plan });
+  const typeName = (id: number) => roomTypes.data?.find((t) => t.id === id)?.name ?? 'Room';
   const book = useMutation({
-    mutationFn: () => post<Confirmation & { payment: { authorization_url: string } }>('bookings/create/', {
+    mutationFn: () => plan ? post<{ payment: { authorization_url: string } }>('bookings/create-group/', {
+      guest, check_in_date: params.get('check_in'), check_out_date: params.get('check_out'),
+      rooms: plan, special_requests: requests, gateway,
+    }) : post<Confirmation & { payment: { authorization_url: string } }>('bookings/create/', {
       guest, room_type: Number(params.get('room_type')), check_in_date: params.get('check_in'),
       check_out_date: params.get('check_out'), number_of_adults: Number(params.get('adults') ?? 1),
       number_of_children: Number(params.get('children') ?? 0), special_requests: requests,
@@ -236,10 +313,11 @@ export function CheckoutPage() {
         <aside className="card stack guest-summary">
           <strong>Your stay</strong>
           <div>{formatDate(params.get('check_in'))} → {formatDate(params.get('check_out'))}</div>
-          <div className="muted">{params.get('adults')} adult(s){Number(params.get('children')) ? `, ${params.get('children')} child(ren)` : ''}</div>
+          <div className="muted">{party(params.get('adults') ?? 1, params.get('children') ?? 0)}</div>
+          {plan && <ul className="guest-plan-rooms">{plan.map((r, i) => <li key={i}>{typeName(r.room_type)} <span className="muted">· {party(r.number_of_adults, r.number_of_children)}</span></li>)}</ul>}
           <div className="muted" style={{ fontSize: 13 }}>{hotel.data?.cancellation_policy}</div>
-          <button className="primary guest-cta" disabled={book.isPending || !gateway}>{book.isPending ? 'Reserving your room…' : 'Continue to payment'}</button>
-          <span className="muted" style={{ fontSize: 12 }}>Your room is held for 15 minutes while you pay.</span>
+          <button className="primary guest-cta" disabled={book.isPending || !gateway}>{book.isPending ? (plan ? 'Reserving your rooms…' : 'Reserving your room…') : 'Continue to payment'}</button>
+          <span className="muted" style={{ fontSize: 12 }}>{plan ? `All ${plan.length} rooms are held` : 'Your room is held'} for 15 minutes while you pay.</span>
         </aside>
       </form>
     </GuestLayout>
@@ -253,7 +331,7 @@ export function PaymentCompletePage() {
   const [attempt, setAttempt] = useState(0);
   const verify = useQuery({
     queryKey: ['verify', reference, attempt],
-    queryFn: () => post<{ status: string; booking: { confirmation_number: string; status: string } | null }>('payments/verify/', { reference }),
+    queryFn: () => post<{ status: string; booking: { confirmation_number: string; status: string } | null; group: { reference: string; bookings: { confirmation_number: string; status: string; room_type_name: string; number_of_adults: number; number_of_children: number }[] } | null }>('payments/verify/', { reference }),
     enabled: !!reference,
     retry: false,
   });
@@ -275,11 +353,17 @@ export function PaymentCompletePage() {
         {verify.error instanceof ApiError && <ErrorAlert error={verify.error} />}
         {status === 'SUCCEEDED' && booking?.status === 'CONFIRMED' && <>
           <h1>You're booked!</h1>
-          <p>Your confirmation number is <strong className="guest-ref">{booking.confirmation_number}</strong>. We've emailed you the details.</p>
+          {verify.data?.group ? <>
+            <p>Your group reference is <strong className="guest-ref">{verify.data.group.reference}</strong>. Each room has its own confirmation number:</p>
+            <ul className="guest-plan-rooms" style={{ textAlign: 'left' }}>{verify.data.group.bookings.map((b) => (
+              <li key={b.confirmation_number}><strong>{b.confirmation_number}</strong> · {b.room_type_name} <span className="muted">· {party(b.number_of_adults, b.number_of_children)}</span></li>
+            ))}</ul>
+            <p>We've emailed you the details.</p>
+          </> : <p>Your confirmation number is <strong className="guest-ref">{booking.confirmation_number}</strong>. We've emailed you the details.</p>}
           <Link className="button" to="/booking/manage">View my booking</Link>
         </>}
-        {status === 'SUCCEEDED' && booking?.status === 'CANCELLED' && <>
-          <h1>Sorry, that room was taken</h1>
+        {status === 'SUCCEEDED' && booking && booking.status !== 'CONFIRMED' && <>
+          <h1>Sorry, {verify.data?.group ? 'some of those rooms were' : 'that room was'} taken</h1>
           <p>Your payment arrived after the room hold expired and the room was booked by someone else. Your payment is being refunded in full.</p>
         </>}
         {status === 'FAILED' && <><h1>Payment not completed</h1><p>No money was taken. <Link to="/book">Try again</Link>.</p></>}

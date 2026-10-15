@@ -7,10 +7,11 @@ from audit.models import AuditLog
 from audit.services import record
 
 from . import lifecycle
-from .services import create_online_booking
+from .services import create_online_booking, create_online_group_booking
 from .serializers import (
     BookingConfirmationSerializer,
     BookingCreateSerializer,
+    GroupBookingCreateSerializer,
     GuestBookingAccessSerializer,
     GuestCancelSerializer,
 )
@@ -35,6 +36,27 @@ class CreateBookingView(CreateAPIView):
         return Response({
             **BookingConfirmationSerializer(booking).data,
             # Send the guest here to pay; the booking is confirmed once payment is verified
+            'payment': {'reference': txn.reference, 'gateway': txn.gateway, 'amount': str(txn.amount),
+                        'currency': txn.currency, 'authorization_url': txn.authorization_url},
+        }, status=status.HTTP_201_CREATED)
+
+
+class CreateGroupBookingView(CreateAPIView):
+    """Book a group plan online: several rooms held together and paid in one checkout."""
+    serializer_class = GroupBookingCreateSerializer
+    permission_classes = [AllowAny]
+    throttle_scope = 'booking_create'
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        group, bookings, txn = create_online_group_booking(serializer.validated_data)
+        for booking in bookings:
+            record(AuditLog.Action.BOOKING_CREATED, request=request, actor_email=booking.guest.email, target=booking,
+                   changes={'group': group.reference, 'source': 'WEBSITE'})
+        return Response({
+            'group_reference': group.reference,
+            'bookings': BookingConfirmationSerializer(bookings, many=True).data,
             'payment': {'reference': txn.reference, 'gateway': txn.gateway, 'amount': str(txn.amount),
                         'currency': txn.currency, 'authorization_url': txn.authorization_url},
         }, status=status.HTTP_201_CREATED)

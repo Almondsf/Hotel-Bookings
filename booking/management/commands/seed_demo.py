@@ -56,6 +56,7 @@ DEMO_PASSWORD = 'DemoPass#2026'
 GUEST_EMAIL_DOMAIN = 'example.com'
 
 STAFF = [
+    ('admin@demo.hotel', 'Demo', 'Admin', User.Role.ADMIN),
     ('manager@demo.hotel', 'Amaka', 'Okonkwo', User.Role.MANAGER),
     ('frontdesk@demo.hotel', 'Tunde', 'Adebayo', User.Role.RECEPTIONIST),
     ('accounts@demo.hotel', 'Fatima', 'Bello', User.Role.ACCOUNTANT),
@@ -65,39 +66,65 @@ STAFF = [
     ('bar@demo.hotel', 'Yusuf', 'Lawal', User.Role.BAR),
 ]
 
-# name, base price, adults, children, bed type, beds, size (sq ft), amenities
+# name: (base price, adults, children, bed type, beds, size in sq ft, amenities, booking weight).
+# The weight is how often the simulation sells the type: budget rooms move most, the suite rarely.
 ROOM_TYPES = {
-    'Standard Room': (Decimal('85000'), 2, 1, 'DOUBLE', 1, 250, ['WiFi', 'TV', 'Air Conditioning']),
+    'Classic Single': (Decimal('55000'), 1, 0, 'SINGLE', 1, 180, ['WiFi', 'TV', 'Air Conditioning', 'Work Desk'], 2),
+    'Standard Room': (Decimal('85000'), 2, 1, 'DOUBLE', 1, 250, ['WiFi', 'TV', 'Air Conditioning'], 3),
+    'Twin Room': (Decimal('90000'), 2, 1, 'TWIN', 2, 280, ['WiFi', 'TV', 'Air Conditioning', 'Work Desk'], 2),
     'Deluxe Suite': (Decimal('150000'), 3, 2, 'KING', 1, 400,
-                     ['WiFi', 'TV', 'Air Conditioning', 'Mini Bar', 'Balcony']),
+                     ['WiFi', 'TV', 'Air Conditioning', 'Mini Bar', 'Balcony'], 4),
+    'Junior Suite': (Decimal('185000'), 2, 2, 'QUEEN', 1, 480,
+                     ['WiFi', 'TV', 'Air Conditioning', 'Mini Bar', 'Balcony', 'Sofa Bed'], 2),
     'Family Suite': (Decimal('220000'), 4, 3, 'KING', 2, 600,
-                     ['WiFi', 'TV', 'Air Conditioning', 'Mini Bar', 'Balcony']),
+                     ['WiFi', 'TV', 'Air Conditioning', 'Mini Bar', 'Balcony'], 2),
     'Executive Suite': (Decimal('350000'), 2, 1, 'KING', 1, 750,
-                        ['WiFi', 'TV', 'Air Conditioning', 'Mini Bar', 'Balcony', 'Work Desk', 'Bathtub']),
+                        ['WiFi', 'TV', 'Air Conditioning', 'Mini Bar', 'Balcony', 'Work Desk', 'Bathtub'], 1),
+    'Presidential Suite': (Decimal('750000'), 4, 2, 'KING', 2, 1600,
+                           ['WiFi', 'TV', 'Air Conditioning', 'Mini Bar', 'Balcony', 'Work Desk', 'Bathtub',
+                            'Jacuzzi', 'Kitchenette', 'Butler Service'], 0.3),
 }
+PREMIUM_AMENITIES = {'Mini Bar', 'Balcony', 'Bathtub', 'Jacuzzi', 'Kitchenette', 'Butler Service'}
 ROOM_DESCRIPTIONS = {
+    'Classic Single': "A smart, compact room for the solo traveller: a comfortable single bed, a proper work desk, "
+                      "fast Wi-Fi and a rain shower. Ideal for a short business trip.",
     'Standard Room': "A bright, quiet room with a plush double bed, rain shower, smart TV and a desk by the window. "
                      "Everything you need for a restful night in the city.",
+    'Twin Room': "Two separate single beds for colleagues or friends sharing, with a desk, a sitting chair and "
+                 "plenty of wardrobe space.",
     'Deluxe Suite': "Generous space with a king-size bed, a sitting area and a private balcony. The minibar is stocked, "
                     "the bathroom has a walk-in shower, and there's room for a little one on request.",
+    'Junior Suite': "A queen-size bed and a separate sitting area with a sofa bed for two children, plus a balcony: "
+                    "a step up in space for couples and small families.",
     'Family Suite': "Two king-size beds and a separate lounge with dining table: plenty of room for the whole family "
                     "to spread out, with a balcony for evening breeze.",
-    'Executive Suite': "Our finest suite: a king-size bed, freestanding bathtub, a proper work desk and a lounge for "
-                       "receiving guests, with views over the pool and the city beyond.",
+    'Executive Suite': "A king-size bed, freestanding bathtub, a proper work desk and a lounge for receiving guests, "
+                       "with views over the pool and the city beyond.",
+    'Presidential Suite': "Our flagship on the top floor: two king bedrooms, a living and dining room for entertaining, "
+                          "a kitchenette, a jacuzzi bath and a private butler on call around the clock.",
 }
 _photo = 'https://images.unsplash.com/photo-{}'.format
 # Placeholder photography; replace with the hotel's own (first one is the primary image)
 ROOM_PHOTOS = {
+    'Classic Single': ['1522771739844-6a9f6d5f14af', '1629140727571-9b5c6f6267b4'],
     'Standard Room': ['1631049307264-da0ec9d70304', '1611892440504-42a792e24d32', '1505693416388-ac5ce068fe85'],
+    'Twin Room': ['1595576508898-0ad5c879a061', '1631049552057-403cdb8f0658'],
     'Deluxe Suite': ['1618773928121-c32242e63f39', '1582719478250-c89cae4dc85b', '1591088398332-8a7791972843'],
+    'Junior Suite': ['1616594039964-ae9021a400a0', '1540518614846-7eded433c457', '1615874959474-d609969a20ed'],
     'Family Suite': ['1566665797739-1674de7a421a', '1560185007-cde436f6a4d0'],
     'Executive Suite': ['1578683010236-d716f9a3f461', '1590490360182-c33d57733427'],
+    'Presidential Suite': ['1566195992011-5f6b21e539aa', '1564078516393-cf04bd966897', '1590381105924-c72589b9ef3f',
+                           '1617104678098-de229db51175'],
 }
 ROOMS = (
     [(f'10{n}', 'Standard Room', 1) for n in range(1, 7)]
+    + [('107', 'Classic Single', 1), ('108', 'Classic Single', 1)]
     + [(f'20{n}', 'Deluxe Suite', 2) for n in range(1, 6)]
+    + [('206', 'Twin Room', 2), ('207', 'Twin Room', 2)]
     + [(f'30{n}', 'Family Suite', 3) for n in range(1, 4)]
+    + [('304', 'Junior Suite', 3), ('305', 'Junior Suite', 3)]
     + [(f'40{n}', 'Executive Suite', 4) for n in range(1, 3)]
+    + [('501', 'Presidential Suite', 5)]
 )
 
 # first, last, phone, nationality, company, vip
@@ -269,11 +296,10 @@ class Command(BaseCommand):
     def configure(self):
         amenities = {}
         for name in {a for spec in ROOM_TYPES.values() for a in spec[6]}:
-            amenities[name], _ = Amenity.objects.get_or_create(name=name, defaults={
-                'is_premium': name in ('Mini Bar', 'Balcony', 'Bathtub')})
+            amenities[name], _ = Amenity.objects.get_or_create(name=name, defaults={'is_premium': name in PREMIUM_AMENITIES})
 
         self.room_types = {}
-        for name, (price, adults, children, bed, beds, size, amenity_names) in ROOM_TYPES.items():
+        for name, (price, adults, children, bed, beds, size, amenity_names, _weight) in ROOM_TYPES.items():
             room_type, _ = RoomType.objects.update_or_create(name=name, defaults={
                 'description': ROOM_DESCRIPTIONS[name],
                 'base_price': price, 'max_adults': adults, 'max_children': children,
@@ -405,7 +431,8 @@ class Command(BaseCommand):
         return {'room_type': room_type, 'number_of_adults': adults, 'number_of_children': children}
 
     def pick_room_type(self):
-        return self.rng.choices(list(self.room_types.values()), weights=[3, 4, 2, 1])[0]
+        names = list(ROOM_TYPES)
+        return self.room_types[self.rng.choices(names, weights=[ROOM_TYPES[n][7] for n in names])[0]]
 
     def free_guest(self, check_in, check_out):
         """A guest with no other stay over these dates (nobody is in two rooms at once)."""
@@ -628,7 +655,8 @@ class Command(BaseCommand):
                                    description=description, category=category, priority=priority)
             # A room off sale for repairs: pick one nobody needs for the next few days
             until = day + timedelta(days=3)
-            for room in Room.objects.filter(status=Room.Status.AVAILABLE).order_by('-room_number'):
+            # A room of a type with several rooms, so no room type disappears from sale entirely
+            for room in Room.objects.filter(status=Room.Status.AVAILABLE, room_type=self.room_types['Deluxe Suite']).order_by('-room_number'):
                 if not maintenance.affected_bookings(room, day, until):
                     maintenance.report(request=self.request(User.Role.MANAGER), room=room,
                                        title='Water damage to ceiling', category='PLUMBING', priority='URGENT',

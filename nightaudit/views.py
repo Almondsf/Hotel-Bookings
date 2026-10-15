@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from authentication.permissions import HasCapability
 from booking.staff_views import parse_date_param
 from hotel.clock import business_date
+from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
 from . import reports, services
 from .models import BusinessDay
@@ -63,6 +64,7 @@ class ReportView(APIView):
 class FlashReportView(ReportView):
     """Manager's flash for ?date= (closed days come from the night-audit snapshot)."""
 
+    @extend_schema(summary="Manager's flash report for a day", parameters=[query('date', 'Day (YYYY-MM-DD); default the business date')], responses=ANY)
     def get(self, request):
         day = parse_date_param(request.query_params, 'date') or business_date()
         closed = BusinessDay.objects.filter(date=day, status=BusinessDay.Status.CLOSED).first()
@@ -74,6 +76,7 @@ class FlashReportView(ReportView):
 class OccupancyReportView(ReportView):
     columns = ['date', 'actual', 'rooms_available', 'rooms_sold', 'occupancy_percent', 'room_revenue', 'adr', 'revpar']
 
+    @extend_schema(summary='Occupancy, ADR and RevPAR per day', parameters=DATE_RANGE, responses=ANY)
     def get(self, request):
         start, end = date_range(request, default_days=6)
         rows = reports.occupancy(start, end)
@@ -81,6 +84,7 @@ class OccupancyReportView(ReportView):
 
 
 class RevenueReportView(ReportView):
+    @extend_schema(summary='Revenue by department and taxes collected', parameters=DATE_RANGE, responses=ANY)
     def get(self, request):
         start, end = date_range(request)
         return self.respond(request, reports.revenue(start, end), 'categories',
@@ -88,6 +92,7 @@ class RevenueReportView(ReportView):
 
 
 class PaymentsReportView(ReportView):
+    @extend_schema(summary='Payments by method and by staff member', parameters=DATE_RANGE, responses=ANY)
     def get(self, request):
         start, end = date_range(request)
         return self.respond(request, reports.payments(start, end), 'by_method',
@@ -95,12 +100,14 @@ class PaymentsReportView(ReportView):
 
 
 class GuestLedgerView(ReportView):
+    @extend_schema(summary='Open folios and what is owed on each', parameters=[query('export', 'csv to download')], responses=ANY)
     def get(self, request):
         return self.respond(request, reports.guest_ledger(), 'folios',
                             ['folio', 'name', 'room', 'booking_status', 'charges', 'payments', 'balance'], 'guest_ledger.csv')
 
 
 class CityLedgerView(ReportView):
+    @extend_schema(summary='What companies owe, aged', parameters=[query('export', 'csv to download')], responses=ANY)
     def get(self, request):
         return self.respond(request, reports.city_ledger(), 'accounts',
                             ['code', 'name', 'credit_limit', 'current', '31_60', '61_90', 'over_90', 'balance'],
@@ -111,6 +118,7 @@ class NightAuditView(APIView):
     """GET: the open business day and what blocks closing it. POST {auto_no_show}: run the audit."""
     permission_classes = [HasCapability('night_audit.run')]
 
+    @extend_schema(summary='Business date, what blocks closing it, recent days', responses=ANY)
     def get(self, request):
         day = services.current_day()
         history = BusinessDay.objects.filter(status=BusinessDay.Status.CLOSED)[:14]
@@ -120,6 +128,7 @@ class NightAuditView(APIView):
             'history': [{'date': d.date, 'closed_at': d.closed_at, 'statistics': d.statistics} for d in history],
         })
 
+    @extend_schema(summary='Close the business day', request=body('NightAuditRun', auto_no_show=s.BooleanField(default=False)), responses=ANY)
     def post(self, request):
         _, summary = services.run(request=request, auto_no_show=bool(request.data.get('auto_no_show')))
         return Response(summary)

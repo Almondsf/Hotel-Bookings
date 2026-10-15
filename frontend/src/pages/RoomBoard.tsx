@@ -3,10 +3,10 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { api, post } from '../api/client';
-import type { BoardRoom, Reservation, Room } from '../api/types';
+import type { BoardRoom, Room } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
-import { CheckInDialog, CheckOutDialog, WalkInDialog, type RoomChoice } from '../components/frontDesk';
-import { ErrorAlert, Loading, Modal, PageHeader, StatusBadge } from '../components/ui';
+import { ReservationActionDialog, WalkInDialog, type RoomChoice } from '../components/frontDesk';
+import { ErrorAlert, Loading, PageHeader, StatusBadge } from '../components/ui';
 import { addDays, formatDate, todayISO } from '../lib/format';
 
 function tileClass(room: BoardRoom) {
@@ -121,22 +121,8 @@ export function RoomBoard() {
         </section>
       ))}
 
-      {pending && pending.kind !== 'walk-in' && <BookingDialog pending={pending} onClose={() => setPending(null)} />}
+      {pending && pending.kind !== 'walk-in' && <ReservationActionDialog bookingId={pending.bookingId} action={pending.kind} onClose={() => setPending(null)} />}
       {pending?.kind === 'walk-in' && <WalkInDialog room={pending.room} onClose={() => setPending(null)} />}
     </div>
   );
-}
-
-/** The board only carries a booking summary; load the full reservation before checking in or out. */
-function BookingDialog({ pending, onClose }: { pending: { kind: 'check-in' | 'check-out'; bookingId: number }; onClose: () => void }) {
-  const reservation = useQuery({
-    queryKey: ['reservation', String(pending.bookingId)],
-    queryFn: () => api<Reservation>(`reservations/${pending.bookingId}/`),
-  });
-  if (!reservation.data) {
-    return <Modal title="Loading reservation" onClose={onClose}>{reservation.error ? <ErrorAlert error={reservation.error} /> : <Loading />}</Modal>;
-  }
-  return pending.kind === 'check-in'
-    ? <CheckInDialog reservation={reservation.data} onClose={onClose} />
-    : <CheckOutDialog reservation={reservation.data} onClose={onClose} />;
 }

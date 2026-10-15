@@ -180,7 +180,7 @@ class Booking(models.Model):
     objects = BookingQuerySet.as_manager()
 
     @property
-    def nights(self):
+    def nights(self) -> int:
         return (self.check_out_date - self.check_in_date).days
 
     def __str__(self):

@@ -11,7 +11,7 @@ import { api, patch, post } from '../api/client';
 import type { Guest, Paginated, Reservation, RoomType } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { addDays, formatDate, formatMoney, todayISO } from '../lib/format';
-import { ErrorAlert, Field, fieldError, Modal } from './ui';
+import { ErrorAlert, Field, fieldError, Loading, Modal } from './ui';
 
 export const ID_TYPES = [
   ['PASSPORT', 'International Passport'], ['NATIONAL_ID', 'National ID (NIN)'],
@@ -354,4 +354,22 @@ export function EditStayDialog({ reservation, onClose }: ActionDialogProps) {
       </form>
     </Modal>
   );
+}
+
+// --- From a booking summary -------------------------------------------------------
+
+/** Lists like the room board and night audit only carry a booking summary: load it, then check in or out. */
+export function ReservationActionDialog({ bookingId, action, onClose }: {
+  bookingId: number; action: 'check-in' | 'check-out'; onClose: () => void;
+}) {
+  const reservation = useQuery({
+    queryKey: ['reservation', String(bookingId)],
+    queryFn: () => api<Reservation>(`reservations/${bookingId}/`),
+  });
+  if (!reservation.data) {
+    return <Modal title="Loading reservation" onClose={onClose}>{reservation.error ? <ErrorAlert error={reservation.error} /> : <Loading />}</Modal>;
+  }
+  return action === 'check-in'
+    ? <CheckInDialog reservation={reservation.data} onClose={onClose} />
+    : <CheckOutDialog reservation={reservation.data} onClose={onClose} />;
 }

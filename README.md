@@ -36,9 +36,9 @@ python manage.py runserver
 cd frontend && npm install && npm run dev        # http://localhost:3000 (proxies /api to :8000)
 ```
 
-Demo staff accounts are printed by `seed_demo` (password `DemoPass#2026`). The public site is at http://localhost:3000/ and the staff portal at http://localhost:3000/login.
+`seed_demo` creates an administrator `admin@demo.hotel` and an account for every role (password `DemoPass#2026` for all). The public site is at http://localhost:3000/ and the staff portal at http://localhost:3000/login.
 
-Tests: `python manage.py test` (backend), `npm test` and `npm run typecheck` (frontend). CI runs both on every push (`.github/workflows/ci.yml`).
+Tests: `python manage.py test` (backend), `npm test` and `npm run typecheck` (frontend), `npm run e2e` (browser tests; see docs/SYSTEM_OVERVIEW.md §16). CI runs all of them on every push (`.github/workflows/ci.yml`).
 
 ## Documentation
 

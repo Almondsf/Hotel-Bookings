@@ -64,7 +64,7 @@ class FolioViewSet(CapabilityPerActionMixin, mixins.ListModelMixin, mixins.Retri
     def get_queryset(self):
         queryset = Folio.objects.select_related('booking', 'guest', 'account')
         if self.action == 'retrieve':
-            queryset = queryset.prefetch_related('charges__posted_by', 'payments__received_by', 'invoices')
+            queryset = queryset.prefetch_related('charges__posted_by', 'payments__received_by', 'payments__transaction', 'invoices')
         params = self.request.query_params
         if params.get('status'):
             queryset = queryset.filter(status=params['status'].upper())

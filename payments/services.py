@@ -89,10 +89,7 @@ def confirm_payment(reference):
             _flag(txn, f"Paid {verification.amount} {verification.currency}, expected {txn.amount} {txn.currency}")
             return txn
 
-        txn.folio_payment = billing.record_payment(
-            txn.folio, method=METHOD_FOR_GATEWAY[txn.gateway], amount=txn.amount, reference=txn.reference,
-            notes=f"{txn.get_gateway_display()} {txn.gateway_transaction_id}",
-        )
+        txn.folio_payment = _record_on_folios(txn)
         txn.status = Status.SUCCEEDED
         txn.settled_at = timezone.now()
         txn.save(update_fields=['status', 'folio_payment', 'gateway_transaction_id', 'gateway_response',
@@ -105,12 +102,50 @@ def confirm_payment(reference):
     return txn
 
 
+def _group_bookings(txn):
+    """The bookings a payment covers: the whole group for an online group plan, else just its booking."""
+    from booking.models import Booking
+
+    if txn.booking_id is None:
+        return []
+    if txn.booking.group_id and txn.purpose == PaymentTransaction.Purpose.BOOKING_PREPAYMENT:
+        return list(Booking.objects.filter(group_id=txn.booking.group_id).order_by('pk'))
+    return [txn.booking]
+
+
+def _record_on_folios(txn):
+    """
+    Record a verified payment. A group plan's single payment is split so each
+    room's folio receives its own prepaid amount; the lead folio's share is
+    the one linked to the transaction. Returns that payment.
+    """
+    from booking.services import amount_due_online
+
+    method, notes = METHOD_FOR_GATEWAY[txn.gateway], f"{txn.get_gateway_display()} {txn.gateway_transaction_id}"
+    bookings = _group_bookings(txn)
+    if len(bookings) < 2:
+        return billing.record_payment(txn.folio, method=method, amount=txn.amount, reference=txn.reference, notes=notes)
+
+    others = [b for b in bookings if b.pk != txn.booking_id]
+    shares = [(billing.folio_for(b), amount_due_online(b)) for b in others]
+    lead_share = txn.amount - sum(amount for _, amount in shares)  # absorbs any rounding difference
+    if lead_share <= 0:
+        raise PaymentError("Group payment doesn't cover the rooms it was taken for.")
+    for folio, amount in shares:
+        billing.record_payment(folio, method=method, amount=amount, reference=txn.reference, notes=notes)
+    return billing.record_payment(txn.folio, method=method, amount=lead_share, reference=txn.reference, notes=notes)
+
+
 def _confirm_booking_or_refund(txn):
     from booking import lifecycle
     from booking.exceptions import BookingError
 
+    bookings = _group_bookings(txn)
     try:
-        lifecycle.confirm_paid_booking(txn.booking)
+        # A group is confirmed whole or not at all: half a group plan is no use to the guests
+        with transaction.atomic():
+            for booking in bookings:
+                lifecycle.confirm_paid_booking(booking)
     except BookingError as e:
         # Paid after the hold lapsed and the room was sold: give the money back
         logger.warning("Refunding %s: booking could not be confirmed (%s)", txn.reference, e.message)
@@ -120,7 +155,8 @@ def _confirm_booking_or_refund(txn):
             _flag(txn, f"Automatic refund failed: {refund_error.message}")
         return
     from booking.services import send_booking_confirmation
-    send_booking_confirmation(txn.booking)
+    for booking in bookings:
+        send_booking_confirmation(booking)
 
 
 def refund_transaction(txn, *, amount, reason, request=None):
@@ -133,10 +169,9 @@ def refund_transaction(txn, *, amount, reason, request=None):
         if amount <= 0 or txn.refunded_amount + amount > txn.amount:
             raise PaymentError(f"Refund must be between 0 and {txn.amount - txn.refunded_amount}.", field='amount')
 
-        # Record on the folio first (checks the folio's credit), then ask the
-        # gateway; a gateway failure rolls the folio entry back.
-        billing.refund(txn.folio, amount=amount, method=METHOD_FOR_GATEWAY[txn.gateway], reference=txn.reference,
-                       reason=reason, request=request)
+        # Record on the folios first (each checks its own credit), then ask the
+        # gateway; a gateway failure rolls the folio entries back.
+        _refund_on_folios(txn, amount, reason, request)
         response = get_gateway(txn.gateway).refund(
             gateway_transaction_id=txn.gateway_transaction_id, reference=txn.reference,
             amount=amount, currency=txn.currency,
@@ -147,6 +182,24 @@ def refund_transaction(txn, *, amount, reason, request=None):
         txn.gateway_response = {**txn.gateway_response, 'refund': response}
         txn.save(update_fields=['refunded_amount', 'status', 'gateway_response', 'updated_at'])
     return txn
+
+
+def _refund_on_folios(txn, amount, reason, request):
+    """Take a gateway refund off the folios the payment went to, the lead folio first, within each one's credit."""
+    folios = [txn.folio] + [billing.folio_for(b) for b in _group_bookings(txn) if b.pk != txn.booking_id]
+    remaining = amount
+    for folio in folios:
+        credit = -folio.balance
+        take = min(credit, remaining) if len(folios) > 1 else remaining
+        if take <= 0:
+            continue
+        billing.refund(folio, amount=take, method=METHOD_FOR_GATEWAY[txn.gateway], reference=txn.reference,
+                       reason=reason, request=request)
+        remaining -= take
+        if remaining <= 0:
+            return
+    if remaining > 0:
+        raise PaymentError(f"Only {amount - remaining} of the refund is owed back to the guest.", field='amount')
 
 
 __all__ = ['GatewayError', 'PaymentError', 'confirm_payment', 'refund_transaction', 'start_payment']

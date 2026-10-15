@@ -123,12 +123,49 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-/** Fetch a file (e.g. invoice PDF) with auth and open it in a new tab. */
+/**
+ * Fetch a file (e.g. an invoice PDF) with auth and show it in a new tab.
+ * The tab is opened straight away, while still handling the click: browsers
+ * block pop-ups opened after waiting for a download.
+ */
 export async function openFile(path: string) {
+  const tab = window.open('', '_blank');
+  try {
+    const response = await request(path, {}, true);
+    const url = URL.createObjectURL(await response.blob());
+    if (tab) {
+      tab.location.href = url;
+      tab.opener = null;
+    } else {
+      saveBlobUrl(url, fileName(response, 'document'));  // pop-ups blocked anyway: download instead
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (error) {
+    tab?.close();
+    throw error;
+  }
+}
+
+/** Fetch a file (CSV or JSON export) with auth and save it under the server's file name. */
+export async function downloadFile(path: string, fallbackName: string) {
   const response = await request(path, {}, true);
   const url = URL.createObjectURL(await response.blob());
-  window.open(url, '_blank', 'noopener');
+  saveBlobUrl(url, fileName(response, fallbackName));
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function fileName(response: Response, fallback: string) {
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  return /filename="?([^";]+)"?/.exec(disposition)?.[1] ?? fallback;
+}
+
+function saveBlobUrl(url: string, name: string) {
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 export const post = <T>(path: string, body: unknown = {}) => api<T>(path, { method: 'POST', body });

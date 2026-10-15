@@ -32,14 +32,22 @@ class ChargeSerializer(serializers.ModelSerializer):
 
 class FolioPaymentSerializer(serializers.ModelSerializer):
     received_by = serializers.EmailField(source='received_by.email', default=None, read_only=True)
+    online = serializers.SerializerMethodField(help_text="Gateway transaction behind an online payment, for card refunds")
 
     class Meta:
         model = FolioPayment
         fields = [
             'id', 'kind', 'method', 'amount', 'tendered_currency', 'tendered_amount', 'exchange_rate',
-            'reference', 'notes', 'received_by', 'received_at', 'service_date', 'is_void', 'void_reason',
+            'reference', 'notes', 'received_by', 'received_at', 'service_date', 'is_void', 'void_reason', 'online',
         ]
         read_only_fields = fields
+
+    def get_online(self, payment) -> dict | None:
+        txn = getattr(payment, 'transaction', None)  # reverse one-to-one; absent for desk payments
+        if txn is None:
+            return None
+        return {'transaction_id': txn.pk, 'gateway': txn.gateway, 'status': txn.status,
+                'refundable': str(txn.amount - txn.refunded_amount)}
 
 
 class InvoiceSummarySerializer(serializers.ModelSerializer):
@@ -62,7 +70,7 @@ class FolioSerializer(serializers.ModelSerializer):
         model = Folio
         fields = [
             'id', 'number', 'display_name', 'booking', 'confirmation_number', 'guest', 'account', 'status',
-            'currency', 'charges_total', 'payments_total', 'balance', 'opened_at', 'closed_at',
+            'currency', 'charges_total', 'payments_total', 'balance', 'opened_at', 'closed_at', 'transferred_at',
         ]
         read_only_fields = fields
 

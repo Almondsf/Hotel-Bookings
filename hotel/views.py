@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from booking.policies import describe_cancellation_policy
+from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
 
 class HealthView(APIView):
@@ -13,6 +14,7 @@ class HealthView(APIView):
     authentication_classes = []
     throttle_classes = []
 
+    @extend_schema(summary='Health check for load balancers', responses=body('Health', status=s.CharField()))
     def get(self, request):
         try:
             with connection.cursor() as cursor:
@@ -26,6 +28,7 @@ class HotelInfoView(APIView):
     """Public facts the guest website needs: name, contacts, times, policies, payment options."""
     permission_classes = [AllowAny]
 
+    @extend_schema(summary='Public hotel facts: name, contacts, times, policy, payment options', responses=ANY)
     def get(self, request):
         from payments.gateways import enabled_gateways
 

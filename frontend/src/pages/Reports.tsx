@@ -2,7 +2,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 
-import { api, openFile, post } from '../api/client';
+import { api, downloadFile, post } from '../api/client';
+import { useAuth } from '../auth/AuthContext';
+import { ReservationActionDialog } from '../components/frontDesk';
 import { ErrorAlert, Loading, PageHeader } from '../components/ui';
 import { addDays, formatDate, formatDateTime, formatMoney, humanize, todayISO } from '../lib/format';
 
@@ -91,7 +93,8 @@ export function Reports() {
   const sold = sum(rows, 'rooms_sold');
   const available = sum(rows, 'rooms_available');
   const roomRevenue = sum(rows, 'room_revenue');
-  const csv = (path: string) => void openFile(`/api/reports/${path}/?from=${from}&to=${to}&export=csv`);
+  const exportCsv = useMutation({ mutationFn: (path: string) => downloadFile(`/api/reports/${path}/?from=${from}&to=${to}&export=csv`, `${path}.csv`) });
+  const csv = (path: string) => exportCsv.mutate(path);
 
   return (
     <div className="stack">
@@ -100,6 +103,7 @@ export function Reports() {
         <input type="date" value={to} onChange={(e) => setTo(e.target.value)} aria-label="To" style={{ width: 'auto' }} />
         <Link className="button" to="/reports/ledgers">Ledgers</Link>
       </>} />
+      <ErrorAlert error={exportCsv.error} />
       <ErrorAlert error={occupancy.error || revenue.error || payments.error} />
       {occupancy.isLoading ? <Loading /> : rows.length > 0 && (
         <>
@@ -224,7 +228,9 @@ interface AuditStatus {
 
 export function NightAudit() {
   const queryClient = useQueryClient();
+  const { can } = useAuth();
   const [autoNoShow, setAutoNoShow] = useState(false);
+  const [checkingOut, setCheckingOut] = useState<number | null>(null);
   const status = useQuery({ queryKey: ['night-audit'], queryFn: () => api<AuditStatus>('night-audit/') });
   const run = useMutation({
     mutationFn: () => post<{ closed: string; opened: string; room_charges_posted: number; no_shows: number }>('night-audit/', { auto_no_show: autoNoShow }),
@@ -246,7 +252,10 @@ export function NightAudit() {
       <div className="card stack">
         <h2 style={{ margin: 0 }}>Before closing the day</h2>
         {departures.length > 0 && <div><strong>Guests due out but still checked in</strong> (check them out or extend their stay):
-          <ul>{departures.map((b) => <li key={b.id}><Link to={`/reservations/${b.id}`}>{b.guest_name}</Link> · Room {b.room}</li>)}</ul></div>}
+          <ul className="audit-list">{departures.map((b) => (
+            <li key={b.id}><Link to={`/reservations/${b.id}`}>{b.guest_name}</Link> · Room {b.room}
+              {can('bookings.manage') && <button className="small" onClick={() => setCheckingOut(b.id)}>Check out</button>}</li>
+          ))}</ul></div>}
         {arrivals.length > 0 && <div><strong>Arrivals still expected</strong>:
           <ul>{arrivals.map((b) => <li key={b.id}><Link to={`/reservations/${b.id}`}>{b.guest_name}</Link> · Room {b.room}</li>)}</ul>
           <label className="checkbox"><input type="checkbox" checked={autoNoShow} onChange={(e) => setAutoNoShow(e.target.checked)} />
@@ -255,6 +264,8 @@ export function NightAudit() {
         <div><button className="primary" disabled={blocked || run.isPending} onClick={() => run.mutate()}>
           Close {formatDate(s.business_date)} and post room charges</button></div>
       </div>
+      {checkingOut !== null && <ReservationActionDialog bookingId={checkingOut} action="check-out"
+        onClose={() => { setCheckingOut(null); void queryClient.invalidateQueries({ queryKey: ['night-audit'] }); }} />}
       <div className="card table-wrap">
         <h2>Recent days</h2>
         {!s.history.length ? <p className="muted">No days closed yet. The first night audit starts the history.</p> : <table>
