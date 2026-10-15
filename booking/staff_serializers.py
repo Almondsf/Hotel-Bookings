@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from billing.models import CorporateAccount
@@ -45,6 +46,7 @@ class GuestDetailSerializer(GuestProfileSerializer):
     class Meta(GuestProfileSerializer.Meta):
         fields = GuestProfileSerializer.Meta.fields + ['stays']
 
+    @extend_schema_field(GuestStaySerializer(many=True))
     def get_stays(self, obj):
         bookings = obj.bookings.select_related('room').order_by('-check_in_date')[:50]
         return GuestStaySerializer(bookings, many=True).data
@@ -97,7 +99,7 @@ class ReservationSerializer(RatePlanInfoMixin, TaxQuoteMixin, CancellationInfoMi
         ]
         read_only_fields = fields
 
-    def get_folio(self, obj):
+    def get_folio(self, obj) -> dict | None:
         try:
             folio = obj.folio
         except Booking.folio.RelatedObjectDoesNotExist:

@@ -1,6 +1,9 @@
 from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from payments.gateways import GatewayField
 from rates.engine import WEBSITE, RatePlanUnavailable, require_plan
 from rates.models import RatePlan
 from rooms.models import RoomType
@@ -43,7 +46,7 @@ def run_domain_validation(check, *args, **kwargs):
 class BookingCreateSerializer(serializers.ModelSerializer):
     room_type = serializers.PrimaryKeyRelatedField(queryset=RoomType.objects.all(), write_only=True)
     guest = GuestSerializer(write_only=True)
-    gateway = serializers.ChoiceField(choices=[], write_only=True)
+    gateway = GatewayField(write_only=True)
     rate_plan = serializers.SlugRelatedField(slug_field='code', queryset=RatePlan.objects.filter(is_active=True),
                                              required=False, allow_null=True, write_only=True)
     promo_code = serializers.CharField(max_length=40, required=False, allow_blank=True, write_only=True)
@@ -59,10 +62,6 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['status', 'confirmation_number', 'price_per_night', 'total_price', 'created_at', 'updated_at']
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        from payments.gateways import enabled_gateways
-        self.fields['gateway'].choices = enabled_gateways()
 
     def validate(self, data):
         run_domain_validation(
@@ -81,6 +80,45 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         return data
 
 
+class GroupRoomSerializer(serializers.Serializer):
+    room_type = serializers.PrimaryKeyRelatedField(queryset=RoomType.objects.all())
+    number_of_adults = serializers.IntegerField(min_value=1)
+    number_of_children = serializers.IntegerField(min_value=0, default=0)
+
+
+class GroupBookingCreateSerializer(serializers.Serializer):
+    """Several rooms booked online together (a group plan), paid in one checkout."""
+    MAX_ROOMS = 10
+
+    guest = GuestSerializer()
+    check_in_date = serializers.DateField()
+    check_out_date = serializers.DateField()
+    rooms = GroupRoomSerializer(many=True)
+    special_requests = serializers.CharField(required=False, allow_blank=True, default='', max_length=2000)
+    gateway = GatewayField()
+
+
+    def validate_rooms(self, rooms):
+        if not 2 <= len(rooms) <= self.MAX_ROOMS:
+            raise serializers.ValidationError(f"A group booking has between 2 and {self.MAX_ROOMS} rooms.")
+        return rooms
+
+    def validate(self, data):
+        for room in data['rooms']:
+            run_domain_validation(
+                validate_stay, room['room_type'], data['check_in_date'], data['check_out_date'],
+                room['number_of_adults'], room['number_of_children'],
+            )
+        # Enough rooms of each type for the whole group (re-checked under a lock on creation)
+        needed = {}
+        for room in data['rooms']:
+            needed[room['room_type']] = needed.get(room['room_type'], 0) + 1
+        for room_type, count in needed.items():
+            if get_available_rooms_for_type(room_type, data['check_in_date'], data['check_out_date']).count() < count:
+                raise serializers.ValidationError(f"Not enough {room_type.name} rooms left for those dates.")
+        return data
+
+
 class TaxQuoteMixin(serializers.Serializer):
     taxes = serializers.SerializerMethodField()
     total_with_taxes = serializers.SerializerMethodField()
@@ -90,10 +128,10 @@ class TaxQuoteMixin(serializers.Serializer):
         from billing.taxes import quote
         return quote(ChargeCategory.ROOM, obj.total_price)
 
-    def get_taxes(self, obj):
+    def get_taxes(self, obj) -> str:
         return str(self._quote(obj)['taxes'])
 
-    def get_total_with_taxes(self, obj):
+    def get_total_with_taxes(self, obj) -> str:
         return str(self._quote(obj)['gross'])
 
 
@@ -102,14 +140,15 @@ class CancellationInfoMixin(serializers.Serializer):
     free_cancellation_until = serializers.SerializerMethodField()
     cancellation_fee_if_cancelled_now = serializers.SerializerMethodField()
 
-    def get_cancellation_policy(self, obj):
+    def get_cancellation_policy(self, obj) -> str:
         return describe_cancellation_policy(obj)
 
+    @extend_schema_field(OpenApiTypes.DATETIME)
     def get_free_cancellation_until(self, obj):
         deadline = free_cancellation_deadline(obj)
         return timezone.localtime(deadline) if deadline else None
 
-    def get_cancellation_fee_if_cancelled_now(self, obj):
+    def get_cancellation_fee_if_cancelled_now(self, obj) -> str | None:
         if obj.status == Booking.Status.PENDING:
             return '0.00'
         if obj.status != Booking.Status.CONFIRMED:
@@ -120,7 +159,7 @@ class CancellationInfoMixin(serializers.Serializer):
 class RatePlanInfoMixin(serializers.Serializer):
     rate_plan = serializers.SerializerMethodField()
 
-    def get_rate_plan(self, obj):
+    def get_rate_plan(self, obj) -> dict | None:
         plan = obj.rate_plan
         if plan is None:
             return {'code': 'BAR', 'name': 'Best Available Rate', 'meal_plan': 'RO', 'is_refundable': True}

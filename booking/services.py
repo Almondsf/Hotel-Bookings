@@ -1,6 +1,7 @@
 import secrets
 import string
 from datetime import timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
@@ -103,6 +104,67 @@ def create_online_booking(validated_data):
         )
         raise
     return booking, txn
+
+
+def create_online_group_booking(validated_data):
+    """
+    Several rooms booked online together (a group plan): every room is held
+    under one BookingGroup and paid in a single checkout at the best
+    available rate. The lead booking (the first room) carries the payment;
+    on success the payment is split across each room's folio and all rooms
+    are confirmed together (payments.services). Returns (group, bookings, txn).
+    """
+    from payments.models import PaymentTransaction
+    from payments.services import start_payment
+
+    check_in_date = validated_data['check_in_date']
+    check_out_date = validated_data['check_out_date']
+    rooms = validated_data['rooms']
+    hold_until = timezone.now() + timedelta(minutes=settings.BOOKING_HOLD_MINUTES)
+
+    with transaction.atomic():
+        lock_room_types(room['room_type'] for room in rooms)
+        guest = Guest.objects.create(**validated_data['guest'])
+        group = BookingGroup.objects.create(reference=generate_group_reference(), booker=guest,
+                                            notes="Booked online as a group plan")
+        bookings, taken, amount_due = [], [], Decimal('0.00')
+        for room in rooms:
+            allocated = allocate_room(room['room_type'], check_in_date, check_out_date, taken=taken)
+            taken.append(allocated.pk)
+            rates = _priced(None, room['room_type'], check_in_date, check_out_date, channel=WEBSITE)
+            total_price, average_rate = summarize(rates)
+            booking = Booking.objects.create(
+                guest=guest, room=allocated, group=group,
+                check_in_date=check_in_date, check_out_date=check_out_date,
+                number_of_adults=room['number_of_adults'], number_of_children=room['number_of_children'],
+                special_requests=validated_data.get('special_requests', ''),
+                price_per_night=average_rate, total_price=total_price,
+                status=Booking.Status.PENDING, source=Booking.Source.WEBSITE, hold_expires_at=hold_until,
+                confirmation_number=generate_confirmation_number(),
+            )
+            create_nights(booking, rates)
+            billing.folio_for(booking)
+            amount_due += quote(ChargeCategory.ROOM, total_price)['gross']
+            bookings.append(booking)
+
+    lead = bookings[0]
+    try:
+        txn = start_payment(
+            gateway=validated_data['gateway'], folio=billing.folio_for(lead), amount=amount_due, email=guest.email,
+            purpose=PaymentTransaction.Purpose.BOOKING_PREPAYMENT, booking=lead, customer_name=str(guest),
+            description=f"Group {group.reference} ({len(bookings)} rooms)",
+        )
+    except DomainError:
+        Booking.objects.filter(group=group).update(
+            status=Booking.Status.CANCELLED, cancelled_at=timezone.now(), cancellation_reason="Payment could not be started",
+        )
+        raise
+    return group, bookings, txn
+
+
+def amount_due_online(booking):
+    """What the guest pays up front for one booking: the stay including taxes."""
+    return quote(ChargeCategory.ROOM, booking.total_price)['gross']
 
 
 def _priced(rate_plan, room_type, check_in_date, check_out_date, *, channel, promo_code=None, account=None,

@@ -28,3 +28,10 @@
   .guest-rate button { grid-column: 1 / -1; justify-content: center; }
   .guest-header { padding: 14px 16px; }
 }
+
+/* Group plans */
+.guest-plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; }
+.guest-plan { display: flex; flex-direction: column; gap: 10px; border-top: 3px solid var(--accent); }
+.guest-plan .home-badge { margin-left: 0; }
+.guest-plan ul, .guest-plan-rooms { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.guest-plan button { margin-top: auto; justify-content: center; }

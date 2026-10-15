@@ -36,7 +36,17 @@ As a guest, I want to search by dates and number of guests, so that I only see r
 - Only room types that fit the party and are free for every night are shown.
 - Each room shows every rate I can book (e.g. room only, bed & breakfast, non-refundable saver) with the total for the stay **including taxes**, the meals included and whether it is refundable.
 - Rates closed by the hotel for those dates (stop-sell, minimum stay…) are not offered.
+- Rooms are listed best fit first (the fewest spare places for my party), then cheapest: on my own I see the single room first; as a couple, the cheapest double before suites. The top result is marked "Best match".
 - If nothing fits, I'm told so and invited to try other dates or contact the hotel.
+
+**G-8 · Book rooms for a big group**
+As a guest booking for a large party (say 10 adults and 4 children), I want the site to suggest combinations of rooms, so that I can book everyone in one go.
+- When no single room fits, I see up to three plans: **Best value** (cheapest), **Fewest rooms**, and **Most space**. Each lists its rooms, who could sleep where (every room has at least one adult) and the total for everyone including taxes.
+- Below the plans I can still browse every available room and book one on its own.
+- "Book this plan" takes me to one checkout and one payment; all the rooms are held together for 15 minutes while I pay.
+- After paying I get a group reference plus a confirmation number for each room, and we split the rooms however we like.
+- If any room in the plan is lost because I paid too late, none of them is confirmed and my whole payment is refunded.
+- Parties that fit one room don't see plans.
 
 **G-3 · Use a promo code**
 As a guest with a promo code, I want to enter it when searching, so that I get the special rate.
@@ -137,6 +147,7 @@ As a receptionist, I want to encode key cards and cancel lost ones, so that only
 **R-12 · Close the day (night shift)**
 As the night receptionist, I want to run the night audit, so that the day's accounts are closed correctly.
 - I see what blocks closing: guests due out still in house, arrivals not yet checked in.
+- I can check out a guest who is due to leave right from the audit page, taking their payment there, instead of hunting for the reservation.
 - I can mark the remaining arrivals as no-shows in the same run.
 - The run posts tonight's room charges, releases lapsed holds, freezes the day's figures and opens the next business day. Running it twice does no harm.
 
@@ -230,7 +241,7 @@ As an accountant or manager, I want standard hotel reports, so that I can manage
 - Payments by method and by staff member (cashier reconciliation).
 - Guest ledger (open bills) and city ledger.
 - POS sales by outlet and best sellers.
-- Every table can be exported to CSV.
+- Every table can be exported to CSV, saved as a file.
 
 **A-5 · Configure taxes and currencies**
 As an accountant, I want to set tax rates and exchange rates, so that bills follow the law and today's rates.
@@ -316,7 +327,8 @@ As an administrator, I want privileged roles to use two-factor sign-in, so that 
 
 **X-4 · Demo and test data**
 As a developer or salesperson, I want a realistic demo hotel, so that I can show and test the system.
-- `manage.py seed_demo` builds a hotel with two weeks of consistent history and accounts for every role; `--reset` starts again. It refuses to run outside development.
+- `manage.py seed_demo` builds a hotel with 22 rooms across 8 room types, two weeks of consistent history, an administrator (`admin@demo.hotel`) and accounts for every role; `--reset` starts again. It refuses to run outside development.
+- `npm run e2e` drives the real app in a browser through every main screen, and CI runs it on every push.
 
 ---
 
@@ -339,6 +351,11 @@ As a staff member, I want to change my password and set up two-factor sign-in, s
 **S-4 · Only see what I'm allowed to**
 As a staff member, I want the menu to show only my tools, so that the system is simple to use.
 - Each role sees only its pages and buttons; the server refuses anything else, even if called directly.
+
+**S-6 · Work from a phone or tablet**
+As a staff member on a tablet or phone, I want the screens to fit, so that I can work away from the desk.
+- No page scrolls sideways; tables, cards and dialogs fit the screen.
+- The menu folds behind a "Menu" button showing the current page, and closes after I pick a page.
 
 **S-5 · Report a fault**
 As any staff member, I want to report a broken item in a room or public area, so that maintenance knows about it.

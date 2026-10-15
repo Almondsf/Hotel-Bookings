@@ -167,3 +167,6 @@ cython_debug/
 
 staticfiles
 
+
+# Throwaway database for browser tests (frontend/playwright.config.ts)
+e2e.sqlite3

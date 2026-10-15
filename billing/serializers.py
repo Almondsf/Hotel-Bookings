@@ -42,7 +42,7 @@ class FolioPaymentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_online(self, payment):
+    def get_online(self, payment) -> dict | None:
         txn = getattr(payment, 'transaction', None)  # reverse one-to-one; absent for desk payments
         if txn is None:
             return None
@@ -70,7 +70,7 @@ class FolioSerializer(serializers.ModelSerializer):
         model = Folio
         fields = [
             'id', 'number', 'display_name', 'booking', 'confirmation_number', 'guest', 'account', 'status',
-            'currency', 'charges_total', 'payments_total', 'balance', 'opened_at', 'closed_at',
+            'currency', 'charges_total', 'payments_total', 'balance', 'opened_at', 'closed_at', 'transferred_at',
         ]
         read_only_fields = fields
 

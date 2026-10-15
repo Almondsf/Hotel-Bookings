@@ -63,6 +63,19 @@ def calculate_average_price_per_night(room_type, check_in_date, check_out_date) 
     return (total / nights).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def rank_for_party(room_types, adults, children, check_in_date, check_out_date):
+    """
+    Order room types for a search: the closest fit for the party first (fewest
+    spare places, so two adults see a double before a family suite), then the
+    lowest price for the stay. Every room type passed in must already fit.
+    """
+    def key(room_type):
+        spare = (room_type.max_adults - adults) + (room_type.max_children - children)
+        return spare, calculate_total_price(room_type, check_in_date, check_out_date), room_type.name
+
+    return sorted(room_types, key=key)
+
+
 def generate_booking_plans(check_in_date, check_out_date, adults, children):
     """
     Generate multiple room booking combinations when no single room fits everyone.
@@ -142,3 +155,82 @@ def _find_room_combinations(adults, children, inventory):
 
     search(0, [], [0] * len(inventory))
     return plans
+
+
+def split_party(room_types, adults, children):
+    """
+    Suggest who sleeps where: every room gets one adult first (children can't
+    have a room alone), then the remaining adults and children fill the
+    largest rooms first. Returns [(room_type, adults, children)] or None if the
+    party can't be split that way.
+    """
+    if adults < len(room_types):
+        return None
+    order = sorted(range(len(room_types)), key=lambda i: (room_types[i].max_adults, room_types[i].max_children), reverse=True)
+    placed_adults = [1] * len(room_types)
+    placed_children = [0] * len(room_types)
+    left_adults, left_children = adults - len(room_types), children
+    for i in order:
+        extra = min(left_adults, room_types[i].max_adults - 1)
+        placed_adults[i] += extra
+        left_adults -= extra
+        kids = min(left_children, room_types[i].max_children)
+        placed_children[i] += kids
+        left_children -= kids
+    if left_adults or left_children:
+        return None
+    return [(room_types[i], placed_adults[i], placed_children[i]) for i in range(len(room_types))]
+
+
+def suggest_group_plans(check_in_date, check_out_date, adults, children, limit=3):
+    """
+    Ready-made multi-room plans for a party too big for one room, booked
+    together as a group: the cheapest ("Best value"), the fewest rooms, and the
+    roomiest for a modest premium ("Most space"), without duplicates. Prices
+    are the best available rate for the stay, with and without taxes.
+    """
+    from billing.models import ChargeCategory
+    from billing.taxes import quote
+
+    nights = (check_out_date - check_in_date).days
+    inventory = []
+    for room_type in RoomType.objects.all():
+        available = get_available_rooms_for_type(room_type, check_in_date, check_out_date).count()
+        if available:
+            inventory.append((room_type, available, calculate_total_price(room_type, check_in_date, check_out_date)))
+
+    candidates = []
+    for combination in _find_room_combinations(adults, children, inventory):
+        rooms = split_party([room_type for room_type, _ in combination], adults, children)
+        if rooms is None:
+            continue
+        total = sum((price for _, price in combination), Decimal('0.00'))
+        spare = sum(rt.max_adults + rt.max_children for rt, _ in combination) - adults - children
+        candidates.append({'rooms': rooms, 'total': total, 'spare': spare})
+    if not candidates:
+        return []
+
+    cheapest = min(candidates, key=lambda p: (p['total'], len(p['rooms'])))
+    fewest = min(candidates, key=lambda p: (len(p['rooms']), p['total']))
+    # Most space: more room to spread out, but not more than half again the cheapest price
+    affordable = [p for p in candidates if p['total'] <= cheapest['total'] * Decimal('1.5')]
+    roomiest = max(affordable, key=lambda p: (p['spare'], -p['total']))
+
+    def signature(plan):
+        return tuple(sorted((rt.pk, a, c) for rt, a, c in plan['rooms']))
+
+    plans, seen = [], set()
+    for label, plan in [('Best value', cheapest), ('Fewest rooms', fewest), ('Most space', roomiest)]:
+        if signature(plan) in seen:
+            continue
+        seen.add(signature(plan))
+        price = quote(ChargeCategory.ROOM, plan['total'])
+        plans.append({
+            'label': label,
+            'rooms': [{'room_type': rt, 'number_of_adults': a, 'number_of_children': c} for rt, a, c in plan['rooms']],
+            'total_price': plan['total'],
+            'taxes': price['taxes'],
+            'total_with_taxes': price['gross'],
+            'price_per_night': (plan['total'] / nights).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP),
+        })
+    return plans[:limit]

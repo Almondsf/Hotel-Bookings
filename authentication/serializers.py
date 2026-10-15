@@ -18,7 +18,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     mfa_required = serializers.BooleanField(read_only=True)
 
-    def get_capabilities(self, obj):
+    def get_capabilities(self, obj) -> list[str]:
         return capabilities_for(obj)
 
 

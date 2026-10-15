@@ -88,10 +88,17 @@ h2 { font-size: 16px; margin: 0 0 12px; font-weight: 600; }
 .page-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
 .page-header p { margin: 4px 0 0; color: var(--text-muted); }
 
+.sidebar-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.menu-toggle { display: none; background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.25); color: #fff; }
 @media (max-width: 860px) {
   .shell { flex-direction: column; }
-  .sidebar { width: 100%; height: auto; position: static; }
-  .sidebar nav { flex-direction: row; flex-wrap: wrap; }
+  .sidebar { width: 100%; height: auto; position: sticky; top: 0; z-index: 20; padding: 10px 14px; }
+  .sidebar .brand { padding: 4px 0; }
+  .menu-toggle { display: inline-flex; }
+  /* Folded by default; the button opens the full menu */
+  .sidebar nav, .sidebar .who { display: none; }
+  .sidebar.open nav { display: flex; flex-direction: row; flex-wrap: wrap; margin-top: 10px; }
+  .sidebar.open .who { display: block; margin-top: 10px; }
   .main { padding: 16px; }
 }
 
@@ -229,3 +236,5 @@ button.small, .button.small { padding: 4px 10px; font-size: 12.5px; }
 .tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
 .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 14px; color: var(--text-muted); }
 .tabs button.active { color: var(--text); border-bottom-color: var(--primary); font-weight: 600; }
+
+.audit-list li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0; }

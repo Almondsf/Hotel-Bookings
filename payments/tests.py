@@ -271,3 +271,101 @@ class EnabledGatewayTests(SimpleTestCase):
     def test_no_credentials_means_no_online_payment(self):
         from payments.gateways import enabled_gateways
         self.assertEqual(enabled_gateways(), [])
+
+
+@override_settings(REQUIRE_GUEST_ID_AT_CHECK_IN=False, PAYSTACK_SECRET_KEY=PAYSTACK_SECRET, BOOKING_HOLD_MINUTES=15)
+class GroupBookingTests(FakeGatewayMixin, APITestCase):
+    """A party too big for one room books a group plan: several rooms, one checkout."""
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.family = RoomType.objects.create(name='Family Suite', description='x', base_price=Decimal('200000.00'),
+                                              max_adults=4, max_children=2, bed_type='KING', bed_count=2, size=600)
+        self.deluxe = RoomType.objects.create(name='Deluxe Suite', description='x', base_price=Decimal('150000.00'),
+                                              max_adults=3, max_children=2, bed_type='KING', bed_count=1, size=400)
+        for n in range(3):
+            Room.objects.create(room_number=f'30{n}', room_type=self.family, floor_number=3)
+        for n in range(2):
+            Room.objects.create(room_number=f'20{n}', room_type=self.deluxe, floor_number=2)
+        self.check_in = timezone.localdate() + timedelta(days=5)
+        self.check_out = self.check_in + timedelta(days=2)
+
+    def search(self, adults, children):
+        return self.client.get(reverse('room-type-search'), {
+            'check_in': self.check_in, 'check_out': self.check_out, 'adults': adults, 'children': children}).data
+
+    def book_plan(self, plan):
+        return self.client.post(reverse('create-group-booking'), {
+            'guest': {'first_name': 'Tunde', 'last_name': 'Bakare', 'email': 'tunde@example.com'},
+            'check_in_date': self.check_in.isoformat(), 'check_out_date': self.check_out.isoformat(),
+            'rooms': [{'room_type': r['room_type_id'], 'number_of_adults': r['number_of_adults'],
+                       'number_of_children': r['number_of_children']} for r in plan['rooms']],
+            'gateway': 'PAYSTACK',
+        }, format='json')
+
+    def test_large_party_gets_group_plans_and_the_regular_list(self):
+        data = self.search(10, 4)
+        self.assertEqual(data['room_types'], [])  # no single room fits
+        self.assertTrue(data['other_room_types'])  # but every room on sale is still listed
+        plans = data['group_plans']
+        self.assertTrue(1 <= len(plans) <= 3)
+        self.assertEqual(plans[0]['label'], 'Best value')
+        for plan in plans:
+            self.assertEqual(sum(r['number_of_adults'] for r in plan['rooms']), 10)
+            self.assertEqual(sum(r['number_of_children'] for r in plan['rooms']), 4)
+            self.assertTrue(all(r['number_of_adults'] >= 1 for r in plan['rooms']))
+        self.assertEqual(len({tuple(sorted(r['room_type_id'] for r in p['rooms'])) for p in plans}), len(plans))
+        # Parties that fit one room get no plans
+        self.assertIsNone(self.search(2, 0)['group_plans'])
+
+    def test_group_plan_is_held_paid_once_and_confirmed_together(self):
+        plan = self.search(10, 4)['group_plans'][0]
+        response = self.book_plan(plan)
+        self.assertEqual(response.status_code, 201, response.data)
+        reference = response.data['payment']['reference']
+        bookings = Booking.objects.filter(group__reference=response.data['group_reference'])
+        self.assertEqual(bookings.count(), len(plan['rooms']))
+        self.assertEqual(set(bookings.values_list('status', flat=True)), {'PENDING'})
+        self.assertEqual(len(set(bookings.values_list('room_id', flat=True))), bookings.count())
+
+        self.gateway.pay(reference)
+        verified = self.client.post(reverse('payment-verify'), {'reference': reference}, format='json').data
+        self.assertEqual(verified['status'], 'SUCCEEDED')
+        self.assertEqual({b['status'] for b in verified['group']['bookings']}, {'CONFIRMED'})
+
+        # One payment, split so every room's bill holds exactly its own prepayment
+        txn = PaymentTransaction.objects.get(reference=reference)
+        from booking.services import amount_due_online
+        total = Decimal('0.00')
+        for booking in bookings:
+            paid = booking.folio.payments_total
+            self.assertEqual(paid, amount_due_online(booking))
+            total += paid
+        self.assertEqual(total, txn.amount)
+
+    def test_group_that_lost_a_room_is_refunded_in_full(self):
+        plan = self.search(10, 4)['group_plans'][0]
+        reference = self.book_plan(plan).data['payment']['reference']
+        expire_holds(now=timezone.now() + timedelta(minutes=16))
+        # Meanwhile every room of one type in the plan is sold to someone else
+        taken_type = plan['rooms'][0]['room_type_id']
+        for room in Room.objects.filter(room_type_id=taken_type):
+            Booking.objects.create(
+                guest=Booking.objects.first().guest, room=room, number_of_adults=1, price_per_night=1, total_price=2,
+                status='CONFIRMED', confirmation_number=f'BK-X{room.pk}', check_in_date=self.check_in,
+                check_out_date=self.check_out)
+
+        self.gateway.pay(reference)
+        self.client.post(reverse('payment-verify'), {'reference': reference}, format='json')
+        txn = PaymentTransaction.objects.get(reference=reference)
+        self.assertEqual(sum(amount for _, amount in self.gateway.refunds), txn.amount)
+        group = Booking.objects.get(pk=txn.booking_id).group
+        self.assertFalse(group.bookings.filter(status='CONFIRMED').exists())
+
+    def test_invalid_group_requests_are_refused(self):
+        plan = self.search(10, 4)['group_plans'][0]
+        one_room = {**plan, 'rooms': plan['rooms'][:1]}
+        self.assertEqual(self.book_plan(one_room).status_code, 400)
+        no_adult = {**plan, 'rooms': [{**plan['rooms'][0], 'number_of_adults': 0}] + plan['rooms'][1:]}
+        self.assertEqual(self.book_plan(no_adult).status_code, 400)

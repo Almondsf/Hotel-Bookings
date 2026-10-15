@@ -1,5 +1,5 @@
-import { Suspense } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { Suspense, useEffect, useState } from 'react';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 
 import type { Capability } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
@@ -34,11 +34,23 @@ export const NAV: { to: string; label: string; capability: Need }[] = [
 
 export function Layout() {
   const { user, can, logout } = useAuth();
+  const { pathname } = useLocation();
+  // On phones and small tablets the menu folds away behind a button
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => setMenuOpen(false), [pathname]);
+  const current = NAV.find((item) => pathname === item.to || pathname.startsWith(`${item.to}/`));
+
   return (
     <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">Hotel <span>PMS</span></div>
-        <nav aria-label="Main">
+      <aside className={`sidebar${menuOpen ? ' open' : ''}`}>
+        <div className="sidebar-top">
+          <div className="brand">Hotel <span>PMS</span></div>
+          <button type="button" className="menu-toggle" aria-expanded={menuOpen} aria-controls="main-nav"
+                  onClick={() => setMenuOpen(!menuOpen)}>
+            {menuOpen ? 'Close' : `Menu${current ? ` · ${current.label}` : ''}`}
+          </button>
+        </div>
+        <nav aria-label="Main" id="main-nav">
           {NAV.filter((item) => allows(can, item.capability)).map((item) => (
             <NavLink key={item.to} to={item.to} end={item.to === '/dashboard' || item.to === '/reservations'}>
               {item.label}

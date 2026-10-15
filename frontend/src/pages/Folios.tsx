@@ -94,6 +94,7 @@ export function FolioDetail() {
   const folio = useQuery({ queryKey: ['folio', id], queryFn: () => api<Folio>(`billing/folios/${id}/`) });
   const hotel = useQuery({ queryKey: ['hotel'], queryFn: () => api<{ payment_gateways: string[] }>('hotel/'), staleTime: 3_600_000 });
   const online = !!hotel.data?.payment_gateways.length;
+  const pdf = useMutation({ mutationFn: (invoiceId: number) => openFile(`/api/billing/invoices/${invoiceId}/pdf/`) });
 
   const mutate = useMutation({
     mutationFn: ({ path, body }: { path: string; body?: unknown }) => post(`billing/folios/${id}/${path}`, body),
@@ -129,7 +130,7 @@ export function FolioDetail() {
           <button onClick={() => window.print()}>Print</button>
         </>}
       />
-      {!dialog && <ErrorAlert error={mutate.error} />}
+      {!dialog && <ErrorAlert error={mutate.error ?? pdf.error} />}
       <div className="grid stats">
         <div className="card stat"><div className="label">Charges</div><div className="value">{formatMoney(f.charges_total)}</div></div>
         <div className="card stat"><div className="label">Paid</div><div className="value">{formatMoney(f.payments_total)}</div></div>
@@ -190,7 +191,7 @@ export function FolioDetail() {
             <div className="row" key={inv.id}>
               <strong>{inv.number}</strong><span className="muted">{formatDateTime(inv.issued_at)}</span>
               <span>{formatMoney(inv.total)}</span>
-              <button onClick={() => void openFile(`/api/billing/invoices/${inv.id}/pdf/`)}>Open PDF</button>
+              <button onClick={() => pdf.mutate(inv.id)}>Open PDF</button>
             </div>
           ))}
         </div>

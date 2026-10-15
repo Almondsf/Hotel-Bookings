@@ -348,9 +348,23 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': 'Reservations, front desk, billing, payments, operations and reporting.',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
-    # Plain APIViews without serializers are left out of the docs; don't let that
-    # noise hide real findings in `check --deploy`
-    'DISABLE_ERRORS_AND_WARNINGS': True,
+    # Plain APIViews describe themselves with @extend_schema (see hotel/schema.py), so
+    # the generator has nothing to warn about; keep warnings on so new gaps show up.
+    'DISABLE_ERRORS_AND_WARNINGS': False,
+    # Choice sets used by several serializers get one stable name each
+    'ENUM_NAME_OVERRIDES': {
+        'ChargeCategoryEnum': 'billing.models.ChargeCategory',
+        'PaymentMethodEnum': 'billing.models.PaymentMethod',
+        'BookingStatusEnum': 'booking.models.Booking.Status',
+        'FolioStatusEnum': 'billing.models.Folio.Status',
+        'PaymentStatusEnum': 'payments.models.PaymentTransaction.Status',
+        'PaymentGatewayEnum': 'payments.models.PaymentTransaction.Gateway',
+        'MaintenanceCategoryEnum': 'maintenance.models.MaintenanceTicket.Category',
+        'MaintenanceStatusEnum': 'maintenance.models.MaintenanceTicket.Status',
+        'HousekeepingTaskStatusEnum': 'housekeeping.models.HousekeepingTask.Status',
+        'OrderStatusEnum': 'pos.models.Order.Status',
+        'OnlineGatewayEnum': ['PAYSTACK', 'FLUTTERWAVE'],
+    },
 }
 SILENCED_SYSTEM_CHECKS = ['drf_spectacular.W001', 'drf_spectacular.W002']
 

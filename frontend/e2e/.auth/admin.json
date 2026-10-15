@@ -1,0 +1,15 @@
+{
+  "cookies": [
+    {
+      "name": "hotel_refresh",
+      "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoicmVmcmVzaCIsImV4cCI6MTc5MjA5NzQ3NywiaWF0IjoxNzkyMDU0Mjc3LCJqdGkiOiIwZmUwYjhkMTkzODc0ODYwYTJhZmFmZWZlOTdiZWMwNyIsInVzZXJfaWQiOiI4In0.DWkqs68EmTgu_kv5DLnS24yiW9nQdWp2vsM03-c6Znw",
+      "domain": "localhost",
+      "path": "/api/auth/",
+      "expires": 1792097477.222748,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Strict"
+    }
+  ],
+  "origins": []
+}

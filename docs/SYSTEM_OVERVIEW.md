@@ -82,7 +82,9 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 - Home page with hero slideshow, booking bar, rooms with photos and "rates from" prices, offers, dining, facilities, events, testimonials, gallery with lightbox, contact and policies. Marketing copy lives in `frontend/src/guest/content.ts`.
 - Room detail pages with photo gallery, amenities, capacity and a booking box.
 - Availability search by dates and party size, showing every bookable rate plan with its total including taxes and its cancellation terms. Promo codes unlock hidden rates.
-- Checkout: guest details, marketing consent (never pre-ticked), acceptance of the cancellation policy, then the Paystack or Flutterwave payment page. The room is held for `BOOKING_HOLD_MINUTES` (15) while the guest pays.
+- Results are ranked for the party: the closest fit first (fewest spare places, so two adults see a double before a family suite), then the lowest price for the stay. The top result is marked "Best match".
+- **Group plans** for parties too big for one room (e.g. 10 adults and 4 children): up to three ready-made combinations of rooms ("Best value", "Fewest rooms", "Most space") with a suggested split of the party (every room has an adult) and the total including taxes. A plan is booked in one checkout under one group reference; the regular list of rooms still shows underneath.
+- Checkout: guest details, marketing consent (never pre-ticked), acceptance of the cancellation policy, then the Paystack or Flutterwave payment page. The room (or every room of a group plan) is held for `BOOKING_HOLD_MINUTES` (15) while the guest pays.
 - Payment return page that verifies the payment with the gateway before confirming.
 - Manage-my-booking: look up by confirmation number + email, see the policy and the fee if cancelled now, cancel.
 - If no payment gateway is configured, checkout explains how to book by phone or email instead.
@@ -104,6 +106,7 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 - Check-out: posts any unbilled nights, takes the remaining payment or bills a company, closes the folio with an invoice, marks the room dirty for housekeeping, emails the guest.
 - Walk-in: book and check in in one step.
 - Key cards: encode and revoke through the door-lock adapter.
+- On phones and small tablets the staff menu folds behind a "Menu" button that shows the current page.
 - Guest profiles: stays, notes and preferences, VIP flag, ID documents (masked; managers can reveal the full number, which is audited), data export and erasure.
 
 ### Billing
@@ -129,8 +132,8 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 - POS: outlets (restaurant, bar, room service, laundry) with menus by section, stock tracking and low-stock warnings; open orders per table; charge to an in-house guest's room (surname must match) or pay on the spot with a receipt; void with reason. Outlets limit which roles may sell there.
 
 ### Management
-- Night audit: shows what blocks closing the day, optionally marks remaining arrivals as no-shows, posts room charges, expires holds, freezes the day's flash statistics, opens the next business day.
-- Reports: occupancy (actual and on the books), ADR, RevPAR, revenue by department with taxes, payments by method and by staff member (cashier report), guest ledger, city ledger with ageing, POS sales; CSV export.
+- Night audit: shows what blocks closing the day (guests due out can be checked out right there), optionally marks remaining arrivals as no-shows, posts room charges, expires holds, freezes the day's flash statistics, opens the next business day.
+- Reports: occupancy (actual and on the books), ADR, RevPAR, revenue by department with taxes, payments by method and by staff member (cashier report), guest ledger, city ledger with ageing, POS sales; CSV export (saved as a file; invoice PDFs open in a new tab).
 - Audit log of every sensitive action: sign-ins (and failures), staff changes, bookings, money movements, ID reveals, rate and room changes, night audits, privacy requests.
 - Settings: room types and rooms, rate plans and restrictions, outlet menus, tax rates, exchange rates.
 - Staff: invite by email (no public sign-up), edit role, deactivate/reactivate, resend invite, reset two-factor.
@@ -203,7 +206,6 @@ The backend is organised as **one Django app per business area**. Inside each ap
 | `distribution` | Channex channel-manager sync (availability/rates out, bookings in) | `services.py`, `channex.py` |
 | `locks` | Door-lock adapters (record-only or on-premise bridge) and key cards | `systems.py`, `services.py` |
 | `privacy` | NDPA export, anonymisation and retention | `services.py` |
-| `profiles` | Legacy, unused | n/a |
 
 ## 7. Data model
 
@@ -274,6 +276,12 @@ stateDiagram-v2
 4. The page calls `POST /api/payments/verify/`. Independently, the gateway calls the webhook. Both paths end in `payments.services.confirm_payment`, which **re-verifies with the gateway** (never trusting the browser or webhook body), checks amount and currency, records the payment on the folio and confirms the booking. It runs under a row lock and is idempotent, so the two paths can race safely.
 5. If the payment arrives after the hold expired and the room has gone, the payment is refunded automatically. The transaction is flagged for staff review only if that refund fails.
 
+### Group plan booking
+1. When no single room fits the party, the search also returns `group_plans` (`rooms.services.suggest_group_plans`: combinations within real availability, each room with at least one adult) and `other_room_types` (everything on sale).
+2. `POST /api/bookings/create-group/` (`booking.services.create_online_group_booking`) locks the room types, allocates every room, and creates one `BookingGroup` with a `PENDING` booking and folio per room, all on the same hold. One gateway checkout covers the total; the first room's booking carries the transaction.
+3. On verification, `payments.services.confirm_payment` splits the single payment so each room's folio receives exactly its own prepaid amount (the lead folio absorbs any rounding), then confirms **all rooms in one transaction**. If any room was lost after the hold lapsed, nothing is confirmed and the whole payment is refunded, drawn from each folio's credit.
+4. Each room keeps its own confirmation number; the guest sees the group reference and every room on the payment-complete page.
+
 ### Stay and billing
 1. **Check-in** (`lifecycle.check_in`): ID recorded if needed, room must be clean and free, booking → `CHECKED_IN`, folio opened, room → `OCCUPIED`, audit entry.
 2. During the stay, charges arrive from the POS (charge to room), staff postings, and the **night audit**, which posts each in-house night's room charge (`billing.post_room_charges`, one per `BookingNight`).
@@ -335,7 +343,7 @@ All endpoints are under `/api/`. JSON in, JSON out. Full, generated reference: `
 
 | Area | Endpoints |
 |---|---|
-| Public | `GET hotel/` (name, contacts, times, policy, enabled gateways) · `GET rooms/types/`, `rooms/<slug>/`, `rooms/search/` · `POST bookings/create/`, `bookings/lookup/`, `bookings/cancel/` · `POST payments/verify/` · gateway and Channex webhooks |
+| Public | `GET hotel/` (name, contacts, times, policy, enabled gateways) · `GET rooms/types/`, `rooms/<slug>/`, `rooms/search/` (ranked; `group_plans` and `other_room_types` for large parties) · `POST bookings/create/`, `bookings/create-group/`, `bookings/lookup/`, `bookings/cancel/` · `POST payments/verify/` · gateway and Channex webhooks |
 | Auth & staff | `auth/login/`, `login/mfa/`, `refresh/`, `logout/`, `me/`, `change-password/`, `password-reset/`, `password-reset/confirm/`, `mfa/setup|enable|disable/` · `staff/` (+ `deactivate`, `reactivate`, `resend-invite`, `reset-mfa`) |
 | Reservations | `reservations/` (list with filters `status`, `arrival`, `departure`, `in_house`, `q`; create) · `reservations/<id>/` (get, PATCH to modify) · `reservations/<id>/check-in|check-out|cancel|no-show|move-room|post-room-charges/` · `reservations/summary/` · `front-desk/walk-in/`, `front-desk/room-board/` · `guests/` (+ `identifications`, `reveal`) |
 | Rooms | `rooms/all/` · `rooms/all/<id>/` (PATCH) · `rooms/types/<id>/` (PATCH) · `rooms/create/`, `rooms/create-room-type/` |
@@ -413,6 +421,8 @@ frontend/src/
 - The sidebar (`NAV` in `Layout.tsx`) and route guards (`Guard` in `App.tsx`) use the same capabilities as the API.
 - In development Vite proxies `/api` to Django (`API_TARGET`, default `http://127.0.0.1:8000`), so the refresh cookie works exactly as in production (same origin).
 - Styling is plain CSS with theme variables in `styles.css` (light and dark).
+- Files: `downloadFile` (api/client.ts) saves exports (CSV, guest data) under the server's file name; `openFile` opens PDFs in a tab opened during the click, because browsers block pop-ups opened after waiting for a download.
+- Browser tests live in `frontend/e2e/` (see section 16).
 
 ## 15. Conventions
 
@@ -423,7 +433,8 @@ frontend/src/
 - **Money:** `Decimal` everywhere, rounded with `hotel.money.money()` (half-up, 2 places). Never floats.
 - **Never delete financial records**; void them with a reason.
 - **Permissions:** add a capability to `CAPABILITIES`, check it with `HasCapability('…')`, and expose it to the frontend through `/auth/me/`.
-- **Tests sit next to the code** (`tests.py`, `test_*.py` in each app). New behaviour comes with tests; business rules are also guarded by database constraints where possible.
+- **Tests sit next to the code** (`tests.py`, `test_*.py` in each app). New behaviour comes with tests; business rules are also guarded by database constraints where possible. Screens that change get a browser test in `frontend/e2e/`.
+- **Document every endpoint.** Views built on serializers are documented automatically. A plain `APIView` that reads `request.data` or query parameters directly declares its inputs and outputs with `@extend_schema` (helpers in `hotel/schema.py`); CI fails if the schema has any warning.
 
 ## 16. Running, seeding and testing
 
@@ -440,19 +451,22 @@ python manage.py runserver                        # http://127.0.0.1:8000
 cd frontend && npm install && npm run dev         # http://localhost:3000
 ```
 
-`seed_demo` creates a 16-room Lagos hotel, staff accounts for every role (password `DemoPass#2026`), guests, companies, rate plans and menus. It then **replays 14 days of operations through the real services**: bookings, check-ins, restaurant and bar sales, payments, check-outs, housekeeping, maintenance, cancellations, no-shows and a night audit each day. The data is therefore consistent, as if staff had used the system. `seed_demo --reset` wipes bookings, bills, orders, tasks, tickets, business days and the audit log (keeping users, rooms and settings) and seeds again.
+`seed_demo` creates a 22-room Lagos hotel with 8 room types (from a ₦55,000 Classic Single to a ₦750,000 Presidential Suite), an administrator (`admin@demo.hotel`) and staff accounts for every role (password `DemoPass#2026` for all), guests, companies, rate plans and menus. It then **replays 14 days of operations through the real services**: bookings, check-ins, restaurant and bar sales, payments, check-outs, housekeeping, maintenance, cancellations, no-shows and a night audit each day. The data is therefore consistent, as if staff had used the system. `seed_demo --reset` wipes bookings, bills, orders, tasks, tickets, business days and the audit log (keeping users, rooms and settings) and seeds again.
 
 | Command | What it runs |
 |---|---|
 | `python manage.py test` | Backend test suite (≈255 tests) |
-| `npm test` / `npm run typecheck` (in `frontend/`) | Frontend tests / TypeScript check |
+| `npm test` / `npm run typecheck` (in `frontend/`) | Frontend unit tests / TypeScript check (app and browser tests) |
+| `npm run e2e` (in `frontend/`) | Browser tests (Playwright): starts its own Django (port 8100) and Vite (port 3100) with a throwaway `e2e.sqlite3` seeded by `seed_demo`. Set `PYTHON` to the Python with the backend installed and, on Windows, `PW_CHANNEL=msedge` to use the installed Edge (the two file-download tests are skipped there, because Edge opens an extra internal page on download that Playwright reports as closed; CI runs them in Chromium). Takes several minutes. |
+| `python manage.py spectacular --validate --fail-on-warn --file schema.yml` | Generate and check the API docs |
 | `python manage.py run_worker` | Background job worker (production) |
 | `python manage.py expire_holds`, `apply_retention` | One-off runs of those jobs |
 
 CI (`.github/workflows/ci.yml`) runs on every push and pull request, on a clean checkout with **no `.env`**:
 
-- **Backend:** checks there are no missing migrations, runs the test suite in parallel against **PostgreSQL 16**, then runs Django's production security audit (`check --deploy`) with `DEBUG` off.
+- **Backend:** checks there are no missing migrations and that the API docs generate without warnings, runs the test suite in parallel against **PostgreSQL 16**, then runs Django's production security audit (`check --deploy`) with `DEBUG` off.
 - **Frontend:** `npm ci`, TypeScript check, tests and a production build.
+- **Browser tests:** the whole Playwright suite against real servers and a seeded demo hotel, in Chromium. Each staff test signs in for itself: the refresh token rotates on every use, so a saved session only works once.
 
 Because CI has no `.env`, settings use their defaults there: `DEBUG` is off, so tests run with production hardening (only the HTTPS redirect is skipped under test, as the test client uses plain HTTP), and payment gateways get placeholder keys. If something passes locally but fails in CI, check that every needed file is committed: the Python `.gitignore` template ignores folders named `lib/`, so `frontend/src/lib/` is explicitly re-included.
 
@@ -460,8 +474,6 @@ Because CI has no `.env`, settings use their defaults there: `DEBUG` is off, so 
 
 - Online payment needs real Paystack/Flutterwave keys and an end-to-end test against the gateways' test mode.
 - Channex and the lock bridge need vendor certification before going live.
-- Some plain API views are missing from the generated OpenAPI docs.
-- Frontend test coverage is thin, and there is no browser end-to-end suite in the repository yet.
-- The staff portal has not been tuned for tablets and phones.
 - An independent penetration test is planned before go-live.
-- The `profiles` app is unused and can be removed.
+- Guest self-service (look up / cancel) works per room: a group plan's rooms are looked up and cancelled one by one with their own confirmation numbers.
+- Frontend unit-test coverage is light; behaviour is mainly covered by the browser suite.

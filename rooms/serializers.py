@@ -70,7 +70,7 @@ class RoomTypeDetailSerializer(serializers.ModelSerializer):
             'created_at'
         ]
     
-    def get_available_room_count(self, obj):
+    def get_available_room_count(self, obj) -> int:
         """Returns count of sellable rooms of this type"""
         return obj.rooms.exclude(status__in=Room.UNSELLABLE_STATUSES).count()
 
@@ -122,11 +122,11 @@ class RoomTypeAvailabilitySerializer(serializers.ModelSerializer):
         total = self.get_total_price(obj)
         return quote(ChargeCategory.ROOM, total) if total is not None else None
 
-    def get_taxes(self, obj):
+    def get_taxes(self, obj) -> str:
         q = self._quote(obj)
         return q and q['taxes']
 
-    def get_total_with_taxes(self, obj):
+    def get_total_with_taxes(self, obj) -> str:
         q = self._quote(obj)
         return q and q['gross']
 

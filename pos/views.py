@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 from authentication.permissions import HasCapability
 from billing.models import PaymentMethod
 from nightaudit.views import date_range
+from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
 from . import services
 from .models import Order, OrderItem, Outlet, Product
@@ -53,7 +54,7 @@ class OrderSerializer(serializers.ModelSerializer):
                   'totals', 'folio', 'room_number', 'opened_at', 'settled_at', 'void_reason']
         read_only_fields = ['id', 'status', 'folio', 'opened_at', 'settled_at', 'void_reason']
 
-    def get_totals(self, obj):
+    def get_totals(self, obj) -> dict:
         return {k: str(v) for k, v in services.totals(obj).items()}
 
 
@@ -76,6 +77,7 @@ class PayNowSerializer(serializers.Serializer):
 
 class OutletViewSet(viewsets.ModelViewSet):
     serializer_class = OutletSerializer
+    queryset = Outlet.objects.none()  # typing hint for the API docs; get_queryset decides
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
     pagination_class = None
 
@@ -109,6 +111,7 @@ class OrderViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.Crea
                    viewsets.GenericViewSet):
     """Orders. ?outlet=<id> ?status=OPEN"""
     serializer_class = OrderSerializer
+    queryset = Order.objects.none()  # typing hint for the API docs; get_queryset decides
 
     def get_permissions(self):
         return [HasCapability('pos.void' if self.action == 'void' else 'pos.use')()]
@@ -174,6 +177,7 @@ class InHouseLookupView(APIView):
     """?room=101 → the in-house guest's name, so the server can confirm it before charging the room."""
     permission_classes = [HasCapability('pos.use')]
 
+    @extend_schema(summary='The in-house guest in a room (for charge-to-room)', parameters=[query('room', 'Room number', required=True)], responses=ANY)
     def get(self, request):
         booking = services.find_in_house(request.query_params.get('room', '').strip())
         if booking is None:
@@ -186,6 +190,7 @@ class InHouseLookupView(APIView):
 class SalesReportView(APIView):
     permission_classes = [HasCapability('reports.view')]
 
+    @extend_schema(summary='Outlet sales and best sellers', parameters=DATE_RANGE[:2], responses=ANY)
     def get(self, request):
         start, end = date_range(request)
         return Response(services.sales_report(start, end))

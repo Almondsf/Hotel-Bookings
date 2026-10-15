@@ -14,6 +14,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from audit.models import AuditLog
 from audit.services import record
+from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
 from . import mfa
 from .models import User, normalize_email
@@ -94,6 +95,7 @@ class MfaLoginView(APIView):
     throttle_classes = [LoginIPThrottle]
     login_ip_throttle_scope = 'login_ip'
 
+    @extend_schema(summary='Sign in, step 2: two-factor code', request=body('MfaLogin', mfa_ticket=s.CharField(), code=s.CharField(required=False), recovery_code=s.CharField(required=False)), responses=ANY)
     def post(self, request):
         user = mfa.user_from_ticket(str(request.data.get('mfa_ticket', '')))
         if user is None:
@@ -112,6 +114,7 @@ class MfaSetupView(APIView):
     """POST: start enrolment (secret + otpauth URI for the authenticator app)."""
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(summary='Start two-factor enrolment', request=None, responses=body('MfaSetup', secret=s.CharField(), otpauth_uri=s.CharField()))
     def post(self, request):
         if request.user.mfa_enabled:
             return Response({'error': 'Two-factor sign-in is already on.'}, status=status.HTTP_409_CONFLICT)
@@ -123,6 +126,7 @@ class MfaEnableView(APIView):
     """POST {code}: confirm enrolment; returns recovery codes, shown only this once."""
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(summary='Confirm two-factor enrolment', request=body('MfaEnable', code=s.CharField()), responses=body('MfaRecoveryCodes', recovery_codes=s.ListField(child=s.CharField())))
     def post(self, request):
         codes = mfa.confirm_enrolment(request.user, str(request.data.get('code', '')))
         if codes is None:
@@ -136,6 +140,7 @@ class MfaDisableView(APIView):
     """POST {password}: turn two-factor off (not allowed where the role requires it)."""
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(summary='Turn two-factor sign-in off', request=body('MfaDisable', password=s.CharField()), responses=ANY)
     def post(self, request):
         user = request.user
         if not user.check_password(str(request.data.get('password', ''))):
@@ -196,6 +201,7 @@ class LogoutView(GenericAPIView):
 class MeView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(summary='The signed-in user and their capabilities', responses=UserSerializer)
     def get(self, request):
         return Response(UserSerializer(request.user).data)
 

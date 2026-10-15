@@ -6,6 +6,7 @@ from rest_framework.views import APIView
 from audit.models import AuditLog
 from audit.services import record
 from authentication.permissions import HasCapability
+from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
 from .models import Room, RoomType
 from .serializers import (
@@ -15,7 +16,7 @@ from .serializers import (
     RoomTypeDetailSerializer,
     RoomTypeSerializer,
 )
-from .services import generate_booking_plans, get_available_rooms_for_type
+from .services import generate_booking_plans, get_available_rooms_for_type, rank_for_party, suggest_group_plans
 
 
 class RoomTypeCreateView(generics.CreateAPIView):
@@ -94,11 +95,14 @@ class RoomTypeSearchView(APIView):
     """
     GET ?check_in=YYYY-MM-DD&check_out=YYYY-MM-DD&adults=N&children=N
 
-    Returns room types that fit the whole party in one room. When none do,
-    also returns multi-room booking plans.
+    Returns room types that fit the whole party in one room, best fit and then
+    lowest price first (see rank_for_party). When none fit, returns up to three
+    ready-made group plans (several rooms booked together, see
+    suggest_group_plans) and every room type on sale (`other_room_types`).
     """
     permission_classes = [AllowAny]
 
+    @extend_schema(summary='Check availability (best fit first; group plans for large parties)', parameters=[RoomSearchQuerySerializer, query('promo_code', 'Unlocks promo rate plans')], responses=ANY)
     def get(self, request, *args, **kwargs):
         query = RoomSearchQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -111,10 +115,11 @@ class RoomTypeSearchView(APIView):
             max_adults__gte=adults,
             max_children__gte=children
         ).prefetch_related('images')
-        room_types = [
-            room_type for room_type in candidates
-            if get_available_rooms_for_type(room_type, check_in, check_out).exists()
-        ]
+        room_types = rank_for_party(
+            [room_type for room_type in candidates
+             if get_available_rooms_for_type(room_type, check_in, check_out).exists()],
+            adults, children, check_in, check_out,
+        )
 
         serializer = RoomTypeAvailabilitySerializer(
             room_types, many=True,
@@ -122,18 +127,44 @@ class RoomTypeSearchView(APIView):
                      'promo_code': request.query_params.get('promo_code', '')[:40]},
         )
 
-        booking_plans = None
+        booking_plans = group_plans = other_room_types = None
         if not room_types:
             plans = generate_booking_plans(check_in, check_out, adults, children)
             booking_plans = {
                 'budget_friendly': self._format_plans(plans['budget_friendly']),
                 'convenience': self._format_plans(plans['convenience'])
             }
+            # Too many people for one room: ready-made groups of rooms, plus every room on sale
+            # so guests can still browse what the hotel has
+            group_plans = [self._format_group_plan(plan) for plan in suggest_group_plans(check_in, check_out, adults, children)]
+            available = [rt for rt in RoomType.objects.prefetch_related('images')
+                         if get_available_rooms_for_type(rt, check_in, check_out).exists()]
+            other_room_types = RoomTypeAvailabilitySerializer(
+                sorted(available, key=lambda rt: rt.base_price), many=True, context=serializer.context,
+            ).data
 
         return Response({
             'room_types': serializer.data,
-            'booking_plans': booking_plans,
+            'group_plans': group_plans,
+            'other_room_types': other_room_types,
+            'booking_plans': booking_plans,  # older format, kept for existing clients
         })
+
+    @staticmethod
+    def _format_group_plan(plan):
+        primary = lambda rt: next((img.image_url for img in rt.images.all() if img.is_primary), None)  # noqa: E731
+        return {
+            'label': plan['label'],
+            'rooms': [{
+                'room_type_id': room['room_type'].id, 'room_type_name': room['room_type'].name,
+                'room_type_slug': room['room_type'].slug, 'primary_image': primary(room['room_type']),
+                'number_of_adults': room['number_of_adults'], 'number_of_children': room['number_of_children'],
+            } for room in plan['rooms']],
+            'total_price': str(plan['total_price']),
+            'taxes': str(plan['taxes']),
+            'total_with_taxes': str(plan['total_with_taxes']),
+            'price_per_night': str(plan['price_per_night']),
+        }
 
     def _format_plans(self, plans):
         """Format plans for JSON response"""

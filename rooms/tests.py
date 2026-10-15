@@ -258,3 +258,34 @@ class RoomEditingTests(APITestCase):
         self.assertEqual(self.client.patch(url, {'room_number': '999'}, format='json').status_code, 200)
         self.room.refresh_from_db()
         self.assertEqual(self.room.room_number, '201')  # room numbers are fixed once created
+
+
+class SearchRankingTests(APITestCase):
+    """Check availability lists the closest fit for the party first, then the cheapest."""
+
+    def setUp(self):
+        for name, price, adults, children in [
+            ('Executive Suite', '350000', 2, 1), ('Family Suite', '220000', 4, 3), ('Classic Single', '40000', 1, 0),
+            ('Deluxe Suite', '150000', 3, 2), ('Standard Room', '85000', 2, 1),
+        ]:
+            room_type = make_room_type(name, price, adults, children)
+            Room.objects.create(room_number=name[:3].upper(), room_type=room_type, floor_number=1)
+        self.check_in = timezone.localdate() + timedelta(days=10)
+
+    def search(self, adults, children=0):
+        response = self.client.get(reverse('room-type-search'), {
+            'check_in': self.check_in, 'check_out': self.check_in + timedelta(days=2),
+            'adults': adults, 'children': children,
+        })
+        self.assertEqual(response.status_code, 200, response.data)
+        return [r['name'] for r in response.data['room_types']]
+
+    def test_single_traveller_sees_the_single_room_first(self):
+        self.assertEqual(self.search(1), ['Classic Single', 'Standard Room', 'Executive Suite', 'Deluxe Suite', 'Family Suite'])
+
+    def test_couple_sees_doubles_cheapest_first_before_suites(self):
+        self.assertEqual(self.search(2), ['Standard Room', 'Executive Suite', 'Deluxe Suite', 'Family Suite'])
+
+    def test_family_sees_the_suite_that_fits_them_first(self):
+        self.assertEqual(self.search(2, 2), ['Deluxe Suite', 'Family Suite'])
+        self.assertEqual(self.search(4, 1), ['Family Suite'])

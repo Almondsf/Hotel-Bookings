@@ -12,9 +12,10 @@ from audit.models import AuditLog
 from audit.services import record
 from authentication.permissions import HasCapability
 from billing.models import Folio
+from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
 from . import services
-from .gateways import GATEWAYS, GatewayError, enabled_gateways
+from .gateways import GATEWAYS, GatewayError, GatewayField
 from .models import PaymentTransaction
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class VerifyPaymentView(APIView):
     permission_classes = [AllowAny]
     throttle_scope = 'payment_verify'
 
+    @extend_schema(summary='Confirm an online payment after the gateway redirect', request=body('VerifyPayment', reference=s.CharField()), responses=ANY)
     def post(self, request):
         reference = str(request.data.get('reference', '')).strip().upper()
         if not REFERENCE_PATTERN.match(reference):
@@ -52,10 +54,17 @@ class VerifyPaymentView(APIView):
         booking = txn.booking
         if booking is not None:
             booking.refresh_from_db()
+        group = None
+        if booking is not None and booking.group_id:
+            members = booking.group.bookings.select_related('room__room_type').order_by('pk')
+            group = {'reference': booking.group.reference, 'bookings': [
+                {'confirmation_number': b.confirmation_number, 'status': b.status, 'room_type_name': b.room.room_type.name,
+                 'number_of_adults': b.number_of_adults, 'number_of_children': b.number_of_children} for b in members]}
         return Response({
             'reference': txn.reference,
             'status': txn.status,
             'booking': {'confirmation_number': booking.confirmation_number, 'status': booking.status} if booking else None,
+            'group': group,
         })
 
 
@@ -66,6 +75,7 @@ class WebhookView(APIView):
     throttle_classes = []
     gateway_code = None
 
+    @extend_schema(summary='Gateway webhook (signature-checked)', request=ANY, responses=ANY)
     def post(self, request):
         gateway = GATEWAYS[self.gateway_code]()
         try:
@@ -97,14 +107,11 @@ class FlutterwaveWebhookView(WebhookView):
 
 class PaymentLinkSerializer(serializers.Serializer):
     folio = serializers.PrimaryKeyRelatedField(queryset=Folio.objects.filter(status=Folio.Status.OPEN))
-    gateway = serializers.ChoiceField(choices=[])
+    gateway = GatewayField()
     email = serializers.EmailField()
     amount = serializers.DecimalField(max_digits=14, decimal_places=2, required=False,
                                       help_text="Defaults to the folio balance")
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields['gateway'].choices = enabled_gateways()
 
 
 class RefundSerializer(serializers.Serializer):
