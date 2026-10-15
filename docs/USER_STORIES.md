@@ -207,12 +207,13 @@ As a manager, I want to void an order before it's paid, with a reason, so that m
 **A-1 · Correct bills safely**
 As an accountant, I want to void charges and payments, move charges between bills and give allowances, so that bills are right without hiding anything.
 - Every correction needs a reason and is recorded in the audit log; nothing is ever deleted.
-- Allowances (discounts posted as negative charges) are supported by the API but have no screen yet **(planned)**.
+- A **Discount** takes an amount off the bill before tax; the VAT and levies on it are reduced to match. It needs a reason and only managers and accountants can give one.
 
 **A-2 · Refund guests**
 As an accountant, I want to refund a guest who is in credit (e.g. an unused deposit), so that they get their money back.
 - Refund amount, method, reference and reason are recorded.
-- Refunding an online payment back to the guest's card through the gateway is supported by the API but has no screen yet **(planned)**.
+- For an online payment I can **Refund to card**: the money goes back through Paystack or Flutterwave to the card or account the guest paid with. This is offered only while the guest is in credit, for no more than they're owed or than is left of that payment.
+- Online payments can't be voided (the card would stay charged); they're corrected with a refund to the card instead.
 
 **A-3 · Run company (city-ledger) accounts**
 As an accountant, I want to manage companies that pay on credit, so that corporate business is billed and collected.

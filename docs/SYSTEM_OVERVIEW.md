@@ -111,7 +111,8 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 - Room nights posted automatically (night audit, check-out, or "update bill"), each night exactly once (database constraint).
 - Extras posted by staff or by the POS, with taxes calculated per category and snapshotted on each charge.
 - Payments by cash, card terminal or bank transfer, in Naira or foreign currency at the latest exchange rate; online payments land automatically.
-- Refunds, voids (with reason and audit), moving a charge to another folio, allowances/discounts.
+- Refunds, voids (with reason and audit), moving a charge to another folio, and discounts (allowances: negative charges whose taxes are reduced to match; managers and accountants only).
+- Refunds of online payments back to the guest's card through the gateway, while the guest is in credit. Online payments aren't voided; they're refunded.
 - Payment links: a gateway checkout URL for an outstanding balance, to send to a guest or company.
 - City ledger: bill a folio to a company (credit limit checked), company statements, company payments, ageing.
 - Gapless invoice numbering per year (`INV-2026-000123`), immutable invoice snapshots, PDF invoices.
@@ -460,7 +461,6 @@ Because CI has no `.env`, settings use their defaults there: `DEBUG` is off, so 
 - Online payment needs real Paystack/Flutterwave keys and an end-to-end test against the gateways' test mode.
 - Channex and the lock bridge need vendor certification before going live.
 - Some plain API views are missing from the generated OpenAPI docs.
-- Two API features have no screen yet: posting allowances (discounts) and refunding an online payment back to the card.
 - Frontend test coverage is thin, and there is no browser end-to-end suite in the repository yet.
 - The staff portal has not been tuned for tablets and phones.
 - An independent penetration test is planned before go-live.

@@ -229,6 +229,37 @@ class StaffPaymentTests(FakeGatewayMixin, APITestCase):
         self.assertEqual(self.client.post(url, {'amount': '1000', 'reason': 'Goodwill'}, format='json').status_code, 400)
         self.assertEqual(self.gateway.refunds, [])
 
+    def test_discount_after_online_payment_is_refunded_to_the_card(self):
+        self.client.force_authenticate(self.receptionist)
+        reference = self.client.post(reverse('payment-transaction-payment-link'), {
+            'folio': self.folio.pk, 'gateway': 'PAYSTACK', 'email': 'bride@example.com',
+        }, format='json').data['reference']
+        self.gateway.pay(reference)
+        self.client.post(reverse('payment-verify'), {'reference': reference}, format='json')
+
+        # The folio shows which payment was online and how much of it can go back to the card
+        detail = self.client.get(reverse('folio-detail', args=[self.folio.pk])).data
+        online = [p['online'] for p in detail['payments'] if p['online']]
+        self.assertEqual(len(online), 1)
+        self.assertEqual((online[0]['gateway'], online[0]['refundable']), ('PAYSTACK', '215000.00'))
+
+        # Receptionists can't give discounts; accountants can, which leaves the guest in credit
+        allowance = {'category': 'ALLOWANCE', 'description': 'Discount: AC fault', 'unit_price': '-10000.00'}
+        charges_url = reverse('folio-charges', args=[self.folio.pk])
+        self.assertEqual(self.client.post(charges_url, allowance, format='json').status_code, 403)
+        self.client.force_authenticate(self.accountant)
+        self.assertEqual(self.client.post(charges_url, allowance, format='json').status_code, 201)
+        self.folio.refresh_from_db()
+        credit = -self.folio.balance
+        self.assertGreater(credit, 0)
+
+        response = self.client.post(reverse('payment-transaction-refund', args=[online[0]['transaction_id']]),
+                                    {'amount': str(credit), 'reason': 'Discount for AC fault'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(len(self.gateway.refunds), 1)
+        self.folio.refresh_from_db()
+        self.assertEqual(self.folio.balance, Decimal('0.00'))
+
 
 class EnabledGatewayTests(SimpleTestCase):
     @override_settings(PAYMENT_GATEWAYS=['PAYSTACK', 'FLUTTERWAVE'], PAYSTACK_SECRET_KEY='sk_test_x', FLUTTERWAVE_SECRET_KEY='')

@@ -147,6 +147,8 @@ export interface FolioPayment {
   received_by: string | null;
   received_at: string;
   is_void: boolean;
+  /** Set for online (gateway) payments: what can still be refunded to the card */
+  online: { transaction_id: number; gateway: string; status: string; refundable: string } | null;
 }
 
 export interface Folio {
