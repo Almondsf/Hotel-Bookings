@@ -79,6 +79,9 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 ## 4. Features by area
 
 ### Public website and booking engine
+- Look: "warm luxury". Ink, sand and cream with bronze-gold accents, Cormorant Garamond headings over Manrope text (Google Fonts, loaded in `frontend/index.html`). The tokens live on `.guest` in `frontend/src/guest/guest.css`, so the shared buttons, fields and cards take on the look; the page layouts are in `home.css`. Dark mode follows the device setting.
+- On the home page the header floats over the full-screen hero and turns solid once you scroll; on phones and small tablets the links fold into a Menu button. Every public page ends with a "Come and stay with us" band before the footer.
+- The public site can be indexed by search engines; staff pages add `noindex` while they are open.
 - Home page with hero slideshow, booking bar, rooms with photos and "rates from" prices, offers, dining, facilities, events, testimonials, gallery with lightbox, contact and policies. Marketing copy lives in `frontend/src/guest/content.ts`.
 - Room detail pages with photo gallery, amenities, capacity and a booking box.
 - Availability search by dates and party size, showing every bookable rate plan with its total including taxes and its cancellation terms. Promo codes unlock hidden rates.
@@ -460,7 +463,7 @@ cd frontend && npm install && npm run dev         # http://localhost:3000
 |---|---|
 | `python manage.py test` | Backend test suite (≈255 tests) |
 | `npm test` / `npm run typecheck` (in `frontend/`) | Frontend unit tests / TypeScript check (app and browser tests) |
-| `npm run e2e` (in `frontend/`) | Browser tests (Playwright): starts its own Django (port 8100) and Vite (port 3100) with a throwaway `e2e.sqlite3` seeded by `seed_demo`. Set `PYTHON` to the Python with the backend installed and, on Windows, `PW_CHANNEL=msedge` to use the installed Edge (the two file-download tests are skipped there, because Edge opens an extra internal page on download that Playwright reports as closed; CI runs them in Chromium). Takes several minutes. |
+| `npm run e2e` (in `frontend/`) | Browser tests (Playwright): starts its own Django (port 8100) and Vite (port 3100) with a throwaway `e2e.sqlite3` seeded by `seed_demo`. Gateway keys are blanked for that server, so keys in your `.env` are never used and the tests see online payment switched off. Set `PYTHON` to the Python with the backend installed and, on Windows, `PW_CHANNEL=msedge` to use the installed Edge (the two file-download tests are skipped there, because Edge opens an extra internal page on download that Playwright reports as closed; CI runs them in Chromium). Takes several minutes. |
 | `python manage.py spectacular --validate --fail-on-warn --file schema.yml` | Generate and check the API docs |
 | `python manage.py run_worker` | Background job worker (production) |
 | `python manage.py expire_holds`, `apply_retention` | One-off runs of those jobs |

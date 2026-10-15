@@ -72,11 +72,27 @@ export function useHotel() {
 export function GuestLayout({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   const hotel = useHotel();
   useEffect(() => { if (hotel.data) document.title = hotel.data.name; }, [hotel.data]);
+  // On the home page the header floats over the hero photo and turns solid once you scroll
+  const [scrolled, setScrolled] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 40);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+  const city = hotel.data?.address?.split(',').slice(-2).join(',').trim();
+
   return (
-    <div className="guest">
-      <header className="guest-header">
-        <Link to="/" className="guest-brand">{hotel.data?.name ?? 'Hotel'}</Link>
-        <nav className="guest-nav" aria-label="Site">
+    <div className={`guest${wide ? ' guest--home' : ''}`}>
+      <header className={`guest-header${wide && !scrolled && !menuOpen ? ' overlay' : ''}${menuOpen ? ' open' : ''}`}>
+        <Link to="/" className="guest-brand" onClick={() => setMenuOpen(false)}>
+          <span className="guest-monogram" aria-hidden="true">{(hotel.data?.name ?? 'H').charAt(0)}</span>
+          <span>{hotel.data?.name ?? 'Hotel'}{city && <small>{city}</small>}</span>
+        </Link>
+        <button type="button" className="guest-menu-toggle" aria-expanded={menuOpen} aria-controls="site-nav"
+                onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? 'Close' : 'Menu'}</button>
+        <nav className="guest-nav" aria-label="Site" id="site-nav" onClick={() => setMenuOpen(false)}>
           <a href="/#rooms">Rooms</a>
           <a href="/#offers">Offers</a>
           <a href="/#dining">Dining</a>
@@ -87,6 +103,11 @@ export function GuestLayout({ children, wide = false }: { children: ReactNode; w
         </nav>
       </header>
       <main className={wide ? 'guest-wide' : 'guest-main'}>{children}</main>
+      <section className="guest-closing" aria-label="Book your stay">
+        <span className="home-kicker">Your stay begins here</span>
+        <h2>Come and stay with us</h2>
+        <Link to="/book" className="button primary guest-cta">Check availability</Link>
+      </section>
       <footer className="guest-footer">
         <div className="guest-footer-grid">
           <div>

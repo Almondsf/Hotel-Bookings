@@ -1,37 +1,100 @@
-/* Guest booking site: warmer, more spacious than the staff portal */
-.guest { min-height: 100%; display: flex; flex-direction: column; background: var(--bg); }
-.guest-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 32px;
-  background: var(--brand); color: #fff; }
-.guest-header a { color: rgba(255, 255, 255, 0.85); }
-.guest-brand { font-size: 20px; font-weight: 700; letter-spacing: 0.02em; color: #fff !important; }
-.guest-main { flex: 1; width: min(1080px, 100%); margin: 0 auto; padding: 28px 16px 56px; display: flex; flex-direction: column; gap: 24px; }
-.guest-hero h1 { font-size: 30px; margin-bottom: 14px; }
-.guest-search { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; align-items: end;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px; box-shadow: var(--shadow); }
-.guest-cta { justify-content: center; padding: 11px 18px; font-size: 15px; }
-.guest-room { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 20px; }
-.guest-room img, .guest-room-placeholder { width: 100%; height: 220px; object-fit: cover; border-radius: 10px; background: var(--surface-2); }
-.guest-rate { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 16px; align-items: center;
-  border-top: 1px solid var(--border); padding-top: 12px; }
-.guest-price { display: flex; flex-direction: column; align-items: flex-end; }
-.guest-price strong { font-size: 18px; }
-.guest-checkout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 20px; align-items: start; }
-.guest-summary { position: sticky; top: 16px; }
-.guest-result { max-width: 560px; margin: 24px auto; text-align: center; }
-.guest-ref { font-size: 22px; letter-spacing: 0.05em; }
-.guest-empty { text-align: center; color: var(--text-muted); }
-.guest-footer { padding: 22px 32px; color: var(--text-muted); font-size: 13px; border-top: 1px solid var(--border);
-  display: flex; flex-direction: column; gap: 4px; align-items: center; }
-@media (max-width: 760px) {
-  .guest-room, .guest-checkout { grid-template-columns: 1fr; }
-  .guest-rate { grid-template-columns: 1fr auto; }
-  .guest-rate button { grid-column: 1 / -1; justify-content: center; }
-  .guest-header { padding: 14px 16px; }
+/*
+ * Public website theme: warm luxury. Deep ink, warm sand and cream, bronze-gold accents,
+ * Cormorant Garamond headings over Manrope text. The shared design tokens are redefined
+ * inside .guest, so fields, buttons and cards from the staff UI kit take on this look
+ * without separate styles.
+ */
+.guest {
+  --ink: #1d1a17;
+  --ink-soft: #2b2622;
+  --sand: #f3ece1;
+  --cream: #fbf8f2;
+  --bronze: #a8743f;
+  --gold: #c9a46a;
+  --stone: #6f655a;
+  --line: #e4d9c8;
+
+  --bg: var(--sand);
+  --surface: var(--cream);
+  --surface-2: #efe6d8;
+  --border: var(--line);
+  --text: var(--ink);
+  --text-muted: var(--stone);
+  --brand: var(--ink);
+  --primary: var(--ink);
+  --primary-hover: #000;
+  --accent: var(--bronze);
+  --focus: var(--bronze);
+  --radius: 4px;
+  --shadow: 0 1px 2px rgba(29, 26, 23, 0.05), 0 8px 24px rgba(29, 26, 23, 0.06);
+  --serif: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  --sans: 'Manrope', 'Inter', system-ui, sans-serif;
+
+  min-height: 100%; display: flex; flex-direction: column;
+  background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 15.5px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+@media (prefers-color-scheme: dark) {
+  .guest {
+    --ink: #f3ece1; --ink-soft: #e9dfcf;
+    --sand: #13110f; --cream: #1c1915; --line: #342e27; --stone: #b3a796;
+    --bronze: #d2a46b; --gold: #d9b67f;
+    --surface-2: #26221d; --primary: #d2a46b; --primary-hover: #e2b884;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.35);
+  }
+  .guest button.primary, .guest .button.primary { color: #13110f; }
 }
 
+.guest h1, .guest h2, .guest h3 { font-family: var(--serif); font-weight: 600; letter-spacing: 0.005em; color: var(--ink); }
+.guest .card { border-radius: var(--radius); border-color: var(--line); box-shadow: var(--shadow); }
+.guest button, .guest .button { border-radius: 2px; letter-spacing: 0.04em; font-weight: 600; }
+.guest button.primary, .guest .button.primary { background: var(--ink); border-color: var(--ink); color: var(--cream); }
+.guest button.primary:hover:not(:disabled), .guest .button.primary:hover { background: var(--bronze); border-color: var(--bronze); color: #fff; }
+.guest input, .guest select, .guest textarea { border-radius: 2px; background: var(--cream); border-color: var(--line); }
+.guest .field { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--stone); font-weight: 600; }
+.guest .field input, .guest .field select, .guest .field textarea { text-transform: none; letter-spacing: normal; font-weight: 500; color: var(--ink); font-size: 15px; }
+.guest .muted { color: var(--stone); }
+.guest a { color: var(--bronze); }
+.guest .alert.success { background: rgba(168, 116, 63, 0.1); color: var(--ink); border-color: rgba(168, 116, 63, 0.35); }
+
+/* ---- Booking engine (search, checkout, confirmation, manage) ------------------------------ */
+.guest-main { flex: 1; width: min(1120px, 100%); margin: 0 auto; padding: 48px 20px 72px; display: flex; flex-direction: column; gap: 28px; }
+.guest-hero h1 { font-size: clamp(36px, 5vw, 52px); margin: 0 0 18px; line-height: 1.05; }
+.guest-search { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; align-items: end;
+  background: var(--cream); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow); }
+.guest-cta { justify-content: center; padding: 13px 22px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; }
+
+.guest-room { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 0; padding: 0; overflow: hidden; }
+.guest-room > img, .guest-room-placeholder { width: 100%; height: 100%; min-height: 260px; object-fit: cover; background: var(--surface-2); border-radius: 0; }
+.guest-room > .stack { padding: 24px 26px; }
+.guest-room h2 { font-size: 28px; }
+.guest-rate { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 18px; align-items: center;
+  border-top: 1px solid var(--line); padding-top: 14px; }
+.guest-rate strong { font-family: var(--sans); }
+.guest-price { display: flex; flex-direction: column; align-items: flex-end; }
+.guest-price strong { font-family: var(--serif); font-size: 24px; font-weight: 600; }
+
+.guest-checkout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; }
+.guest-checkout h1 { font-size: 40px; margin: 0; }
+.guest-summary { position: sticky; top: 96px; border-top: 3px solid var(--bronze); }
+.guest-result { max-width: 600px; margin: 24px auto; text-align: center; padding: 40px 32px; border-top: 3px solid var(--bronze); }
+.guest-result h1 { font-size: 44px; margin: 0 0 12px; }
+.guest-ref { font-family: var(--serif); font-size: 30px; letter-spacing: 0.06em; color: var(--bronze); }
+.guest-empty { text-align: center; color: var(--stone); padding: 32px; }
+
 /* Group plans */
-.guest-plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; }
-.guest-plan { display: flex; flex-direction: column; gap: 10px; border-top: 3px solid var(--accent); }
+.guest-plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap: 18px; }
+.guest-plan { display: flex; flex-direction: column; gap: 12px; border-top: 3px solid var(--bronze); padding: 22px; }
 .guest-plan .home-badge { margin-left: 0; }
-.guest-plan ul, .guest-plan-rooms { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.guest-plan > strong { font-family: var(--serif); font-size: 26px; font-weight: 600; }
+.guest-plan ul, .guest-plan-rooms { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
 .guest-plan button { margin-top: auto; justify-content: center; }
+
+@media (max-width: 760px) {
+  .guest-main { padding: 32px 16px 48px; }
+  .guest-room, .guest-checkout { grid-template-columns: minmax(0, 1fr); }
+  .guest-room > img, .guest-room-placeholder { min-height: 220px; height: 220px; }
+  .guest-rate { grid-template-columns: minmax(0, 1fr) auto; }
+  .guest-rate button { grid-column: 1 / -1; justify-content: center; }
+  .guest-summary { position: static; }
+}

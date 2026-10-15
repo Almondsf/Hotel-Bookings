@@ -38,6 +38,14 @@ export function Layout() {
   // On phones and small tablets the menu folds away behind a button
   const [menuOpen, setMenuOpen] = useState(false);
   useEffect(() => setMenuOpen(false), [pathname]);
+  // The staff portal is private: keep it out of search results (the public site stays indexable)
+  useEffect(() => {
+    const meta = document.createElement('meta');
+    meta.name = 'robots';
+    meta.content = 'noindex';
+    document.head.appendChild(meta);
+    return () => meta.remove();
+  }, []);
   const current = NAV.find((item) => pathname === item.to || pathname.startsWith(`${item.to}/`));
 
   return (
