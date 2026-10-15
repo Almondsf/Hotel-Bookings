@@ -40,7 +40,8 @@ export default defineConfig<Options>({
   workers: 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
+  // In CI each failure also becomes an annotation on the GitHub run, readable without the full log
+  reporter: process.env.CI ? [['github'], ['list']] : 'list',
   timeout: 120_000, // long flows on a busy machine; CI is faster
   expect: { timeout: 10_000 },
   use: {
