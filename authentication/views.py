@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -8,7 +9,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import RefreshToken, UntypedToken
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
 
@@ -161,19 +162,62 @@ class RefreshView(GenericAPIView):
     # Not the login budget: page reloads refresh, and sharing it locked staff out after a few clicks
     login_ip_throttle_scope = 'token_refresh'
 
+    # Two page loads can present the same refresh cookie moments apart (a quick double reload, or a
+    # navigation that cuts off the first response before its new cookie is stored). Within this
+    # window the second request gets the same rotated tokens instead of a sign-out. Tokens sent in
+    # the body (API clients) stay strictly single-use.
+    ROTATION_GRACE_SECONDS = 30
+
     def post(self, request):
         from_cookie = 'refresh' not in request.data
         token = request.COOKIES.get(REFRESH_COOKIE, '') if from_cookie else request.data['refresh']
-        serializer = self.get_serializer(data={'refresh': token})
+        if not token:
+            return self.expired()
+        # Only browsers (cookie sessions) race like this; API clients keep the strict one-use rule
+        reused = self.recently_rotated(token) if from_cookie else None
+        if reused is not None:
+            data = reused
+        else:
+            serializer = self.get_serializer(data={'refresh': token})
+            try:
+                serializer.is_valid(raise_exception=True)
+            except (TokenError, AuthenticationFailed):
+                return self.expired()
+            data = serializer.validated_data
+            if from_cookie:
+                self.remember_rotation(token, data)
+        response = Response(data)
+        return with_refresh_cookie(response, data) if from_cookie else response
+
+    @staticmethod
+    def expired():
+        # 401 (not 403) so clients know to sign in again
+        return Response({"detail": "Session expired. Please sign in again."}, status=status.HTTP_401_UNAUTHORIZED)
+
+    @staticmethod
+    def _grace_key(token):
         try:
-            if not token:
-                raise AuthenticationFailed("No session")
-            serializer.is_valid(raise_exception=True)
-        except (TokenError, AuthenticationFailed):
-            # 401 (not 403) so clients know to sign in again
-            return Response({"detail": "Session expired. Please sign in again."}, status=status.HTTP_401_UNAUTHORIZED)
-        response = Response(serializer.validated_data)
-        return with_refresh_cookie(response, serializer.validated_data) if from_cookie else response
+            return f"refresh-rotated:{UntypedToken(token)['jti']}"  # checks the signature and expiry
+        except TokenError:
+            return None
+
+    def remember_rotation(self, old_token, data):
+        key = self._grace_key(old_token)
+        if key and 'refresh' in data:
+            cache.set(key, {'access': data['access'], 'refresh': data['refresh']}, self.ROTATION_GRACE_SECONDS)
+
+    def recently_rotated(self, token):
+        """The tokens this one was just rotated into, unless the session has since ended (logout, password change)."""
+        key = self._grace_key(token)
+        data = cache.get(key) if key else None
+        if data is None:
+            return None
+        try:
+            RefreshToken(data['refresh'])  # raises if that token has been blacklisted since
+        except TokenError:
+            cache.delete(key)
+            return None
+        return dict(data)
 
 
 class LogoutView(GenericAPIView):

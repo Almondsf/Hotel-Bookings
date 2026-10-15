@@ -56,6 +56,7 @@ As a guest with a promo code, I want to enter it when searching, so that I get t
 As a guest, I want to book and pay in one go, so that my room is guaranteed.
 - I enter my name, email and phone, can add special requests, and must accept the cancellation policy.
 - Marketing consent is a separate, unticked box.
+- Before paying I'm told when free cancellation ends for my dates, or that it has already passed (a last-minute booking), or that the rate is non-refundable.
 - I pay on Paystack's or Flutterwave's secure page; the hotel never sees my card.
 - My room is held for 15 minutes while I pay. If I don't pay in time, the hold is released.
 - When I return, I see my confirmation number once the payment is **verified with the gateway**, and I receive a confirmation email (and SMS if enabled).
@@ -67,6 +68,7 @@ As a guest, I want to look up and cancel my booking myself, so that I don't have
 - I find it with my confirmation number and email; a wrong combination gives the same answer as a missing booking (no information leak), and repeated attempts are rate-limited.
 - Before cancelling I see the policy and the exact fee if I cancel now.
 - Cancelling within the free period costs nothing; later, the policy fee applies. I receive a cancellation email.
+- If I paid online, whatever I paid beyond the fee goes back to my card automatically, and the page tells me how much. Cancelling one room of a group refunds only that room.
 
 **G-6 · Be reminded before arrival**
 As a guest, I want a reminder the day before I arrive, so that I have the hotel's details to hand.
@@ -337,7 +339,7 @@ As a developer or salesperson, I want a realistic demo hotel, so that I can show
 **S-1 · Sign in securely**
 As a staff member, I want to sign in with my email and password (and an authenticator code if I've turned it on), so that only I can use my account.
 - Wrong passwords are rate-limited per IP and per account; failures are audited.
-- Reloading pages doesn't sign me out, even when several desk computers share one internet connection.
+- Reloading pages doesn't sign me out, even when several desk computers share one internet connection, or when I reload twice quickly.
 
 **S-2 · Reset a forgotten password**
 As a staff member, I want to reset my password by email, so that I'm not locked out.

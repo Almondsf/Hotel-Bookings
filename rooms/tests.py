@@ -289,3 +289,27 @@ class SearchRankingTests(APITestCase):
     def test_family_sees_the_suite_that_fits_them_first(self):
         self.assertEqual(self.search(2, 2), ['Deluxe Suite', 'Family Suite'])
         self.assertEqual(self.search(4, 1), ['Family Suite'])
+
+
+class CancellationTermsInSearchTests(APITestCase):
+    """Search tells guests when free cancellation ends for their dates, before they pay."""
+
+    def setUp(self):
+        room_type = make_room_type('Standard', '50000', 2, 0)
+        Room.objects.create(room_number='101', room_type=room_type, floor_number=1)
+
+    def plan_terms(self, days_ahead):
+        check_in = timezone.localdate() + timedelta(days=days_ahead)
+        response = self.client.get(reverse('room-type-search'), {
+            'check_in': check_in, 'check_out': check_in + timedelta(days=1), 'adults': 1})
+        return response.data['room_types'][0]['rate_plans'][0]
+
+    def test_last_minute_stay_is_already_past_free_cancellation(self):
+        terms = self.plan_terms(days_ahead=1)  # inside the default 48-hour window
+        self.assertTrue(terms['free_cancellation_passed'])
+        self.assertIsNotNone(terms['free_cancellation_until'])
+
+    def test_stay_further_out_shows_the_deadline(self):
+        terms = self.plan_terms(days_ahead=10)
+        self.assertFalse(terms['free_cancellation_passed'])
+        self.assertIn('T14:00:00', terms['free_cancellation_until'])  # 48 hours before the 14:00 check-in

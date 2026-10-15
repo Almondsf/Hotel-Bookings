@@ -175,11 +175,12 @@ MAX_GUESTS_PER_SEARCH = env.int('MAX_GUESTS_PER_SEARCH', default=50)
 # outside production. Webhook URLs to register with the providers:
 #   https://<api-host>/api/payments/webhooks/paystack/
 #   https://<api-host>/api/payments/webhooks/flutterwave/
-PAYMENT_GATEWAYS = env.list('PAYMENT_GATEWAYS', default=['PAYSTACK', 'FLUTTERWAVE'])
-# The test suite drives the gateways through fakes, so it gets placeholder keys; everywhere else a
-# gateway without its key is simply not offered (see payments.gateways.enabled_gateways).
-PAYSTACK_SECRET_KEY = env('PAYSTACK_SECRET_KEY', default='sk_test_placeholder' if TESTING else '')
-FLUTTERWAVE_SECRET_KEY = env('FLUTTERWAVE_SECRET_KEY', default='FLWSECK_TEST-placeholder' if TESTING else '')
+PAYMENT_GATEWAYS = ['PAYSTACK', 'FLUTTERWAVE'] if TESTING else env.list('PAYMENT_GATEWAYS', default=['PAYSTACK', 'FLUTTERWAVE'])
+# The test suite drives the gateways through fakes with placeholder keys, whatever a developer's .env
+# holds, so tests never reach a real account. Everywhere else a gateway without its key is simply
+# not offered (see payments.gateways.enabled_gateways).
+PAYSTACK_SECRET_KEY = 'sk_test_placeholder' if TESTING else env('PAYSTACK_SECRET_KEY', default='')
+FLUTTERWAVE_SECRET_KEY = 'FLWSECK_TEST-placeholder' if TESTING else env('FLUTTERWAVE_SECRET_KEY', default='')
 FLUTTERWAVE_WEBHOOK_HASH = env('FLUTTERWAVE_WEBHOOK_HASH', default='')
 # Where the gateway sends the guest back after paying (fixed server-side, so
 # it can't be abused as an open redirect)
@@ -210,6 +211,11 @@ REQUIRE_CLEAN_ROOM_AT_CHECK_IN = env.bool('REQUIRE_CLEAN_ROOM_AT_CHECK_IN', defa
 REQUIRE_ROOM_INSPECTION = env.bool('REQUIRE_ROOM_INSPECTION', default=False)
 # Nigerian hotels record guest ID at arrival; check-in is refused without one
 REQUIRE_GUEST_ID_AT_CHECK_IN = env.bool('REQUIRE_GUEST_ID_AT_CHECK_IN', default=True)
+
+# Rate limits and the refresh-token grace window live in the cache. One process can use the default
+# in-memory cache; several (e.g. gunicorn workers) need a shared one, e.g. CACHE_URL=redis://...
+# or CACHE_URL=dbcache://django_cache (then run `manage.py createcachetable`).
+CACHES = {'default': env.cache('CACHE_URL', default='locmemcache://')}
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=env.int('JWT_ACCESS_MINUTES', default=15)),

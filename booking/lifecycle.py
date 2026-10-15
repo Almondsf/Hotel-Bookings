@@ -247,11 +247,15 @@ def cancel(booking, *, reason='', waive_penalty=False, request=None, by_guest=Fa
         ])
         _post_penalty(booking, "Late cancellation fee", request)
 
-    notify('booking_cancelled', booking)
     record(AuditLog.Action.BOOKING_CANCELLED, request=request, target=booking,
            actor_email=booking.guest.email if by_guest else '',
            changes={'penalty': str(booking.penalty_amount), 'waived': booking.penalty_waived,
                     'policy_penalty': str(penalty), 'by_guest': by_guest, 'reason': reason})
+    # Money prepaid online beyond the fee goes straight back to the guest's card (outside the
+    # cancellation's transaction: a slow or failing gateway never blocks the cancellation itself)
+    from payments.services import refund_prepaid_remainder
+    refund_prepaid_remainder(booking, request=request)
+    notify('booking_cancelled', booking)
     return booking
 
 
