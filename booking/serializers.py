@@ -171,17 +171,25 @@ class BookingConfirmationSerializer(RatePlanInfoMixin, TaxQuoteMixin, Cancellati
     room_number = serializers.CharField(source='room.room_number', read_only=True)
     room_type_name = serializers.CharField(source='room.room_type.name', read_only=True)
     payments = PaymentSerializer(source='payment_transactions', many=True, read_only=True)
+    refunded = serializers.SerializerMethodField(help_text="Paid back to the guest from this booking's bill")
 
     class Meta:
         model = Booking
         fields = [
             'confirmation_number', 'guest', 'room_number', 'room_type_name', 'rate_plan',
             'check_in_date', 'check_out_date', 'number_of_adults', 'number_of_children',
-            'price_per_night', 'total_price', 'taxes', 'total_with_taxes', 'status', 'payments',
+            'price_per_night', 'total_price', 'taxes', 'total_with_taxes', 'status', 'payments', 'refunded',
             'cancellation_policy', 'free_cancellation_until', 'cancellation_fee_if_cancelled_now',
             'cancelled_at', 'penalty_amount', 'created_at',
         ]
 
+    def get_refunded(self, obj) -> str:
+        from billing.models import FolioPayment
+        folio = getattr(obj, 'folio', None)
+        if folio is None:
+            return '0.00'
+        total = sum((p.amount for p in folio.payments.filter(kind=FolioPayment.Kind.REFUND, is_void=False)), 0)
+        return f"{total:.2f}"
 
 class GuestBookingAccessSerializer(serializers.Serializer):
     """Guests prove access to a booking with its confirmation number and email."""

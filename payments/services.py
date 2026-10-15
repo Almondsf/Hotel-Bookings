@@ -159,8 +159,12 @@ def _confirm_booking_or_refund(txn):
         send_booking_confirmation(booking)
 
 
-def refund_transaction(txn, *, amount, reason, request=None):
-    """Refund (part of) a gateway payment to the payer's card/account."""
+def refund_transaction(txn, *, amount, reason, request=None, folios=None):
+    """
+    Refund (part of) a gateway payment to the payer's card/account. `folios`
+    limits which bills the refund comes off (e.g. only a cancelled room's);
+    by default the payment's own folio(s).
+    """
     amount = money(amount)
     with transaction.atomic():
         txn = PaymentTransaction.objects.select_for_update().get(pk=txn.pk)
@@ -171,7 +175,7 @@ def refund_transaction(txn, *, amount, reason, request=None):
 
         # Record on the folios first (each checks its own credit), then ask the
         # gateway; a gateway failure rolls the folio entries back.
-        _refund_on_folios(txn, amount, reason, request)
+        _refund_on_folios(txn, amount, reason, request, folios)
         response = get_gateway(txn.gateway).refund(
             gateway_transaction_id=txn.gateway_transaction_id, reference=txn.reference,
             amount=amount, currency=txn.currency,
@@ -184,9 +188,9 @@ def refund_transaction(txn, *, amount, reason, request=None):
     return txn
 
 
-def _refund_on_folios(txn, amount, reason, request):
-    """Take a gateway refund off the folios the payment went to, the lead folio first, within each one's credit."""
-    folios = [txn.folio] + [billing.folio_for(b) for b in _group_bookings(txn) if b.pk != txn.booking_id]
+def _refund_on_folios(txn, amount, reason, request, folios=None):
+    """Take a gateway refund off the folios the payment went to (lead folio first), within each one's credit."""
+    folios = folios or [txn.folio] + [billing.folio_for(b) for b in _group_bookings(txn) if b.pk != txn.booking_id]
     remaining = amount
     for folio in folios:
         credit = -folio.balance
@@ -202,4 +206,39 @@ def _refund_on_folios(txn, amount, reason, request):
         raise PaymentError(f"Only {amount - remaining} of the refund is owed back to the guest.", field='amount')
 
 
-__all__ = ['GatewayError', 'PaymentError', 'confirm_payment', 'refund_transaction', 'start_payment']
+def refund_prepaid_remainder(booking, *, request=None):
+    """
+    After a booking is cancelled, send back to the guest's card whatever they
+    prepaid online beyond the cancellation fee. Only this booking's bill is
+    touched, so cancelling one room of a group plan never refunds the others.
+    Returns the amount refunded (0 if none). If the gateway refuses, the
+    credit stays on the folio for staff to refund, and the reason is audited.
+    """
+    folio = billing.folio_for(booking)
+    credit = -folio.balance
+    if credit <= 0:
+        return money(0)
+    payments = PaymentTransaction.objects.filter(
+        purpose=PaymentTransaction.Purpose.BOOKING_PREPAYMENT, status=Status.SUCCEEDED)
+    payments = payments.filter(booking__group_id=booking.group_id) if booking.group_id else payments.filter(booking=booking)
+    txn = payments.order_by('-settled_at').first()
+    if txn is None:
+        return money(0)  # paid at the desk: staff refund it the way it was paid
+    amount = min(credit, txn.amount - txn.refunded_amount)
+    if amount <= 0:
+        return money(0)
+    try:
+        refund_transaction(txn, amount=amount, request=request, folios=[folio],
+                           reason=f"Cancellation of {booking.confirmation_number}: prepaid amount beyond the fee")
+    except DomainError as e:
+        logger.warning("Automatic refund for %s failed: %s", booking.confirmation_number, e.message)
+        record(AuditLog.Action.PAYMENT_NEEDS_REVIEW, request=request, target=txn,
+               changes={'booking': booking.confirmation_number, 'refund_due': str(amount), 'reason': e.message})
+        return money(0)
+    record(AuditLog.Action.ONLINE_PAYMENT_REFUNDED, request=request, target=txn,
+           changes={'booking': booking.confirmation_number, 'amount': str(amount), 'automatic': True})
+    return amount
+
+
+__all__ = ['GatewayError', 'PaymentError', 'confirm_payment', 'refund_prepaid_remainder', 'refund_transaction',
+           'start_payment']

@@ -291,6 +291,37 @@ class BrowserCookieSessionTests(AuthTestCase):
     def test_refresh_without_any_token(self):
         self.assertEqual(self.client.post(reverse('token-refresh'), {}, format='json').status_code, 401)
 
+    def test_quick_double_refresh_does_not_sign_out(self):
+        """Two page loads sending the same cookie moments apart both stay signed in, with the same new token."""
+        self.login('ada@hotel.com', HTTP_X_AUTH_MODE='cookie')
+        old = self.client.cookies['hotel_refresh'].value
+        first = self.client.post(reverse('token-refresh'), {}, format='json')
+        self.assertEqual(first.status_code, 200)
+        rotated = first.cookies['hotel_refresh'].value
+        self.client.cookies['hotel_refresh'] = old  # the second load never saw the new cookie
+        second = self.client.post(reverse('token-refresh'), {}, format='json')
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(second.cookies['hotel_refresh'].value, rotated)  # no extra token minted
+
+    def test_rotated_token_is_refused_after_sign_out_or_the_grace_window(self):
+        tokens = self.login('ada@hotel.com', HTTP_X_AUTH_MODE='cookie').data
+        old = self.client.cookies['hotel_refresh'].value
+        self.client.post(reverse('token-refresh'), {}, format='json')
+        # Signing out revokes the rotated token, so the grace copy must not revive it
+        self.bearer(tokens['access'])
+        self.assertEqual(self.client.post(reverse('logout'), {}, format='json').status_code, 205)
+        self.client.credentials()
+        self.client.cookies['hotel_refresh'] = old
+        self.assertEqual(self.client.post(reverse('token-refresh'), {}, format='json').status_code, 401)
+
+        # Outside the window an old token is simply rejected
+        self.login('ada@hotel.com', HTTP_X_AUTH_MODE='cookie')
+        old = self.client.cookies['hotel_refresh'].value
+        self.client.post(reverse('token-refresh'), {}, format='json')
+        cache.clear()  # the grace entry has expired
+        self.client.cookies['hotel_refresh'] = old
+        self.assertEqual(self.client.post(reverse('token-refresh'), {}, format='json').status_code, 401)
+
     def test_page_reloads_do_not_use_up_the_login_budget(self):
         """Each page load refreshes the session; a busy desk must not be locked out of signing in."""
         self.login('ada@hotel.com', HTTP_X_AUTH_MODE='cookie')

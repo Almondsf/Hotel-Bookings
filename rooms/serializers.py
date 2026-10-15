@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from .models import Amenity, RoomImage, RoomPricing, RoomAvailabilityOverride, RoomType, Room
 from django.conf import settings
+from django.utils import timezone
 
 from hotel.clock import business_date
 from rooms.services import (
@@ -147,6 +148,7 @@ class RoomTypeAvailabilitySerializer(serializers.ModelSerializer):
                 'meal_plan': plan.meal_plan, 'meal_plan_name': plan.get_meal_plan_display(),
                 'is_refundable': plan.is_refundable, 'total_price': str(priced['net']),
                 'taxes': str(priced['taxes']), 'total_with_taxes': str(priced['gross']),
+                **cancellation_terms(plan, check_in),
             })
         return plans
 
@@ -156,6 +158,23 @@ class RoomTypeAvailabilitySerializer(serializers.ModelSerializer):
         """
         images = list(obj.images.all())  # uses prefetch; ordered primary-first
         return images[0].image_url if images else None
+
+
+def cancellation_terms(plan, check_in_date):
+    """
+    When free cancellation ends for a stay starting `check_in_date` under `plan` (None = best
+    available rate), using the same policy that prices a cancellation. A last-minute booking may
+    already be past it, so guests are told before they pay.
+    """
+    from types import SimpleNamespace
+
+    from booking.policies import free_cancellation_deadline
+
+    deadline = free_cancellation_deadline(SimpleNamespace(rate_plan=plan, check_in_date=check_in_date))
+    return {
+        'free_cancellation_until': timezone.localtime(deadline).isoformat() if deadline else None,
+        'free_cancellation_passed': deadline is None or deadline <= timezone.now(),
+    }
 
 
 class RoomSerializer(serializers.ModelSerializer):

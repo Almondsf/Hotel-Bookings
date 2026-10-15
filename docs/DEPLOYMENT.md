@@ -16,6 +16,9 @@ cp .env.example .env
 #   HOTEL_NAME, HOTEL_ADDRESS, HOTEL_PHONE, HOTEL_EMAIL, HOTEL_TAX_ID
 #   EMAIL_BACKEND + SMTP settings (or a provider such as Mailgun/SES)
 #   PAYSTACK_SECRET_KEY / FLUTTERWAVE_SECRET_KEY / FLUTTERWAVE_WEBHOOK_HASH
+#   CACHE_URL                    shared cache for rate limits and sign-in sessions when running
+#                                several workers, e.g. redis://redis:6379/1, or dbcache://django_cache
+#                                (then: python manage.py createcachetable)
 docker compose up -d --build
 docker compose exec api python manage.py createsuperuser
 ```

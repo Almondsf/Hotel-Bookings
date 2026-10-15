@@ -4,7 +4,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { api, ApiError, post } from '../api/client';
 import { ErrorAlert, Field, fieldError, Loading } from '../components/ui';
-import { addDays, formatDate, formatMoney, todayISO } from '../lib/format';
+import { addDays, formatDate, formatDateTime, formatMoney, todayISO } from '../lib/format';
 import './guest.css';
 import './home.css';
 
@@ -16,6 +16,7 @@ interface HotelInfo {
 interface RatePlanOffer {
   code: string; name: string; description: string; meal_plan_name: string; is_refundable: boolean;
   total_price: string; taxes: string; total_with_taxes: string;
+  free_cancellation_until: string | null; free_cancellation_passed: boolean;
 }
 
 interface RoomOffer {
@@ -27,6 +28,7 @@ interface GroupPlan {
   label: string;
   rooms: { room_type_id: number; room_type_name: string; primary_image: string | null; number_of_adults: number; number_of_children: number }[];
   total_price: string; taxes: string; total_with_taxes: string; price_per_night: string;
+  free_cancellation_until: string | null; free_cancellation_passed: boolean;
 }
 
 interface SearchResults { room_types: RoomOffer[]; group_plans: GroupPlan[] | null; other_room_types: RoomOffer[] | null }
@@ -41,10 +43,21 @@ function decodePlan(value: string | null) {
   return rooms.length >= 2 ? rooms : null;
 }
 
+/** How a rate's cancellation terms read for the dates searched. */
+function cancellationNote(terms: { free_cancellation_until: string | null; free_cancellation_passed: boolean }) {
+  if (terms.free_cancellation_until === null) return 'Non-refundable';
+  if (terms.free_cancellation_passed) return 'No free cancellation for these dates';
+  return `Free cancellation until ${formatDateTime(terms.free_cancellation_until)}`;
+}
+
+/** Carried to checkout so the guest is warned before paying ("none" = non-refundable). */
+const termsParam = (terms: { free_cancellation_until: string | null }) => terms.free_cancellation_until ?? 'none';
+
 const party = (adults: number | string, children: number | string) =>
   `${adults} adult${Number(adults) === 1 ? '' : 's'}${Number(children) ? `, ${children} child${Number(children) === 1 ? '' : 'ren'}` : ''}`;
 
 interface Confirmation {
+  refunded?: string;
   confirmation_number: string; status: string; room_type_name: string; check_in_date: string; check_out_date: string;
   total_with_taxes: string; cancellation_policy: string; cancellation_fee_if_cancelled_now: string | null;
   rate_plan: { name: string; is_refundable: boolean };
@@ -181,7 +194,8 @@ export function SearchPage() {
                       <strong>{formatMoney(plan.total_with_taxes)}</strong>
                       <span className="muted">{stay} night{stay === 1 ? '' : 's'} for everyone, incl. taxes</span>
                     </div>
-                    <button className="primary" onClick={() => navigate(`/book/checkout?${new URLSearchParams({ ...query, plan: encodePlan(plan) })}`)}>
+                    <span className="muted" style={{ fontSize: 13 }}>{cancellationNote(plan)}</span>
+                    <button className="primary" onClick={() => navigate(`/book/checkout?${new URLSearchParams({ ...query, plan: encodePlan(plan), free_until: termsParam(plan) })}`)}>
                       Book this plan</button>
                   </article>
                 ))}
@@ -193,7 +207,7 @@ export function SearchPage() {
           )}
           {results.data?.room_types.map((room, index) => (
             <RoomOfferCard key={room.id} room={room} stay={stay} best={index === 0 && results.data!.room_types.length > 1}
-                           onSelect={(plan) => navigate(`/book/checkout?${new URLSearchParams({ ...query, room_type: String(room.id), rate_plan: plan })}`)} />
+                           onSelect={(plan, freeUntil) => navigate(`/book/checkout?${new URLSearchParams({ ...query, room_type: String(room.id), rate_plan: plan, free_until: freeUntil })}`)} />
           ))}
           {!!results.data?.other_room_types?.length && (
             <section className="stack" aria-label="All rooms">
@@ -203,8 +217,8 @@ export function SearchPage() {
               </div>
               {results.data.other_room_types.map((room) => (
                 <RoomOfferCard key={room.id} room={room} stay={stay}
-                               onSelect={(plan) => navigate(`/book/checkout?${new URLSearchParams({
-                                 ...query, room_type: String(room.id), rate_plan: plan,
+                               onSelect={(plan, freeUntil) => navigate(`/book/checkout?${new URLSearchParams({
+                                 ...query, room_type: String(room.id), rate_plan: plan, free_until: freeUntil,
                                  adults: String(Math.min(Number(params.get('adults') ?? 1), room.max_adults)),
                                  children: String(Math.min(Number(params.get('children') ?? 0), room.max_children)) })}`)} />
               ))}
@@ -216,7 +230,7 @@ export function SearchPage() {
   );
 }
 
-function RoomOfferCard({ room, stay, best = false, onSelect }: { room: RoomOffer; stay: number; best?: boolean; onSelect: (ratePlan: string) => void }) {
+function RoomOfferCard({ room, stay, best = false, onSelect }: { room: RoomOffer; stay: number; best?: boolean; onSelect: (ratePlan: string, freeUntil: string) => void }) {
   return (
     <article className="card guest-room">
       {room.primary_image ? <img src={room.primary_image} alt={room.name} loading="lazy" />
@@ -232,18 +246,33 @@ function RoomOfferCard({ room, stay, best = false, onSelect }: { room: RoomOffer
           <div className="guest-rate" key={plan.code}>
             <div>
               <strong>{plan.name}</strong>
-              <div className="muted" style={{ fontSize: 13 }}>{plan.meal_plan_name} · {plan.is_refundable ? 'Free cancellation available' : 'Non-refundable'}</div>
+              <div className="muted" style={{ fontSize: 13 }}>{plan.meal_plan_name} · {cancellationNote(plan)}</div>
             </div>
             <div className="guest-price">
               <strong>{formatMoney(plan.total_with_taxes)}</strong>
               <span className="muted">{stay} night{stay === 1 ? '' : 's'}, incl. taxes</span>
             </div>
-            <button className="primary" onClick={() => onSelect(plan.code)}>Select</button>
+            <button className="primary" onClick={() => onSelect(plan.code, termsParam(plan))}>Select</button>
           </div>
         ))}
       </div>
     </article>
   );
+}
+
+/**
+ * Before paying, say plainly when free cancellation ends for these dates: a last-minute booking is
+ * already past it. (Display only; the server applies the real policy when a booking is cancelled.)
+ */
+function CheckoutCancellationNote({ freeUntil }: { freeUntil: string | null }) {
+  if (!freeUntil) return null;
+  if (freeUntil === 'none') {
+    return <div className="alert error" role="note">Non-refundable: the full stay is charged if you cancel.</div>;
+  }
+  if (new Date(freeUntil).getTime() <= Date.now()) {
+    return <div className="alert error" role="note">Free cancellation has already passed for these dates. If you cancel, the cancellation fee in the policy above applies.</div>;
+  }
+  return <div className="alert success" role="note">Free cancellation until {formatDateTime(freeUntil)}.</div>;
 }
 
 export function CheckoutPage() {
@@ -316,6 +345,7 @@ export function CheckoutPage() {
           <div className="muted">{party(params.get('adults') ?? 1, params.get('children') ?? 0)}</div>
           {plan && <ul className="guest-plan-rooms">{plan.map((r, i) => <li key={i}>{typeName(r.room_type)} <span className="muted">· {party(r.number_of_adults, r.number_of_children)}</span></li>)}</ul>}
           <div className="muted" style={{ fontSize: 13 }}>{hotel.data?.cancellation_policy}</div>
+          <CheckoutCancellationNote freeUntil={params.get('free_until')} />
           <button className="primary guest-cta" disabled={book.isPending || !gateway}>{book.isPending ? (plan ? 'Reserving your rooms…' : 'Reserving your room…') : 'Continue to payment'}</button>
           <span className="muted" style={{ fontSize: 12 }}>{plan ? `All ${plan.length} rooms are held` : 'Your room is held'} for 15 minutes while you pay.</span>
         </aside>
@@ -404,6 +434,11 @@ export function ManageBookingPage() {
               <dt>Stay</dt><dd>{formatDate(booking.check_in_date)} → {formatDate(booking.check_out_date)}</dd>
               <dt>Total</dt><dd>{formatMoney(booking.total_with_taxes)}</dd>
             </dl>
+            {booking.status === 'CANCELLED' && Number(booking.refunded ?? 0) > 0 && (
+              <div className="alert success">
+                {formatMoney(booking.refunded)} has been refunded to the card you paid with. It usually reaches you within a few working days.
+              </div>
+            )}
             <p className="muted" style={{ margin: 0 }}>{booking.cancellation_policy}</p>
             {booking.cancellation_fee_if_cancelled_now !== null && (
               <div className="stack">

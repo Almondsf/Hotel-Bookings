@@ -369,3 +369,82 @@ class GroupBookingTests(FakeGatewayMixin, APITestCase):
         self.assertEqual(self.book_plan(one_room).status_code, 400)
         no_adult = {**plan, 'rooms': [{**plan['rooms'][0], 'number_of_adults': 0}] + plan['rooms'][1:]}
         self.assertEqual(self.book_plan(no_adult).status_code, 400)
+
+
+@override_settings(REQUIRE_GUEST_ID_AT_CHECK_IN=False, PAYSTACK_SECRET_KEY=PAYSTACK_SECRET, BOOKING_HOLD_MINUTES=15,
+                   FREE_CANCELLATION_HOURS=48, CANCELLATION_PENALTY_NIGHTS=1)
+class CancellationRefundTests(FakeGatewayMixin, APITestCase):
+    """Cancelling a booking paid online sends what's left after the fee back to the card."""
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.room_type = RoomType.objects.create(name='Standard', description='x', base_price=Decimal('50000.00'),
+                                                 max_adults=2, max_children=0, bed_type='KING', bed_count=1, size=300)
+        for n in range(3):
+            Room.objects.create(room_number=f'10{n}', room_type=self.room_type, floor_number=1)
+
+    def book_and_pay(self, days_ahead, nights=2):
+        check_in = timezone.localdate() + timedelta(days=days_ahead)
+        response = self.client.post(reverse('create-booking'), {
+            'guest': {'first_name': 'Ada', 'last_name': 'Obi', 'email': 'ada@example.com'},
+            'room_type': self.room_type.id, 'check_in_date': check_in.isoformat(),
+            'check_out_date': (check_in + timedelta(days=nights)).isoformat(), 'number_of_adults': 1, 'gateway': 'PAYSTACK',
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        reference = response.data['payment']['reference']
+        self.gateway.pay(reference)
+        self.client.post(reverse('payment-verify'), {'reference': reference}, format='json')
+        return PaymentTransaction.objects.get(reference=reference)
+
+    def guest_cancels(self, booking):
+        return self.client.post(reverse('booking-cancel'), {
+            'confirmation_number': booking.confirmation_number, 'email': booking.guest.email}, format='json')
+
+    def test_free_cancellation_refunds_everything_to_the_card(self):
+        txn = self.book_and_pay(days_ahead=10)
+        response = self.guest_cancels(txn.booking)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['refunded'], str(txn.amount))  # the guest is told what's coming back
+        self.assertEqual(self.gateway.refunds, [(txn.reference, txn.amount)])
+        txn.refresh_from_db()
+        self.assertEqual((txn.status, txn.refunded_amount), ('REFUNDED', txn.amount))
+        self.assertEqual(txn.folio.balance, Decimal('0.00'))
+
+    def test_late_cancellation_refunds_all_but_the_fee(self):
+        txn = self.book_and_pay(days_ahead=1)  # inside the 48-hour window: one night is charged
+        self.guest_cancels(txn.booking)
+        booking = Booking.objects.get(pk=txn.booking_id)
+        self.assertEqual(booking.penalty_amount, Decimal('50000.00'))
+        self.assertEqual(self.gateway.refunds, [(txn.reference, txn.amount - Decimal('50000.00'))])
+        self.assertEqual(txn.folio.balance, Decimal('0.00'))  # fee paid from the prepayment, nothing owed either way
+
+    def test_a_failed_refund_leaves_the_credit_for_staff(self):
+        txn = self.book_and_pay(days_ahead=10)
+        with mock.patch.object(self.gateway, 'refund', side_effect=GatewayError('Paystack error: try again later')):
+            self.assertEqual(self.guest_cancels(txn.booking).status_code, 200)  # the cancellation still happens
+        self.assertEqual(Booking.objects.get(pk=txn.booking_id).status, 'CANCELLED')
+        txn.refresh_from_db()
+        self.assertEqual(txn.refunded_amount, Decimal('0.00'))
+        self.assertEqual(-txn.folio.balance, txn.amount)  # still owed to the guest, visible on the folio
+
+    def test_cancelling_one_room_of_a_group_refunds_only_that_room(self):
+        check_in = timezone.localdate() + timedelta(days=10)
+        response = self.client.post(reverse('create-group-booking'), {
+            'guest': {'first_name': 'Tunde', 'last_name': 'Bakare', 'email': 'tunde@example.com'},
+            'check_in_date': check_in.isoformat(), 'check_out_date': (check_in + timedelta(days=2)).isoformat(),
+            'rooms': [{'room_type': self.room_type.id, 'number_of_adults': 2}] * 3, 'gateway': 'PAYSTACK',
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        reference = response.data['payment']['reference']
+        self.gateway.pay(reference)
+        self.client.post(reverse('payment-verify'), {'reference': reference}, format='json')
+
+        rooms = list(Booking.objects.filter(group__reference=response.data['group_reference']).order_by('pk'))
+        lead, cancelled = rooms[0], rooms[1]
+        share = cancelled.folio.payments_total
+        self.guest_cancels(cancelled)
+        self.assertEqual(self.gateway.refunds, [(reference, share)])
+        self.assertEqual(Booking.objects.get(pk=cancelled.pk).folio.balance, Decimal('0.00'))
+        self.assertEqual(-Booking.objects.get(pk=lead.pk).folio.balance, lead.folio.payments_total)  # lead's money untouched
+        self.assertEqual(Booking.objects.filter(pk__in=[lead.pk, rooms[2].pk], status='CONFIRMED').count(), 2)

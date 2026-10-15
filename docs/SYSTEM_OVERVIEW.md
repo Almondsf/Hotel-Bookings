@@ -86,7 +86,8 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 - **Group plans** for parties too big for one room (e.g. 10 adults and 4 children): up to three ready-made combinations of rooms ("Best value", "Fewest rooms", "Most space") with a suggested split of the party (every room has an adult) and the total including taxes. A plan is booked in one checkout under one group reference; the regular list of rooms still shows underneath.
 - Checkout: guest details, marketing consent (never pre-ticked), acceptance of the cancellation policy, then the Paystack or Flutterwave payment page. The room (or every room of a group plan) is held for `BOOKING_HOLD_MINUTES` (15) while the guest pays.
 - Payment return page that verifies the payment with the gateway before confirming.
-- Manage-my-booking: look up by confirmation number + email, see the policy and the fee if cancelled now, cancel.
+- Manage-my-booking: look up by confirmation number + email, see the policy and the fee if cancelled now, cancel. What was prepaid online beyond the fee goes back to the card automatically, and the page says how much.
+- Each rate in the results states when free cancellation ends for the dates searched (or that it has already passed, or that the rate is non-refundable), and checkout repeats it before the guest pays.
 - If no payment gateway is configured, checkout explains how to book by phone or email instead.
 
 ### Reservations
@@ -96,6 +97,7 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 - Changing dates, room type, party size or requests, with re-pricing and availability re-checked. In-house guests can extend or shorten.
 - Moving a guest to another room, optionally re-pricing the remaining nights.
 - Cancellation and no-show under a configurable policy: free until `FREE_CANCELLATION_HOURS` (48) before check-in, then `CANCELLATION_PENALTY_NIGHTS` (1) night. Non-refundable plans forfeit the stay. Staff may waive a penalty with a reason; guests can't.
+- When a booking paid online is cancelled (by the guest or staff), whatever was prepaid beyond the fee is refunded to the card automatically (`payments.services.refund_prepaid_remainder`), from that booking's bill only, so cancelling one room of a group never touches the others. If the gateway refuses, the cancellation still stands, the credit stays on the folio for staff to refund, and the failure is in the audit log.
 - Unpaid online holds expire automatically.
 - Each night's agreed price is stored separately (`BookingNight`), so later price changes never alter an existing booking.
 
@@ -144,7 +146,7 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 
 ### Security and compliance
 - Two-factor sign-in (authenticator app + recovery codes), required for admin, manager and accountant when `ENFORCE_MFA=True`.
-- Short-lived access tokens; refresh token in an httpOnly cookie; sessions revoked on password change, deactivation, role change.
+- Short-lived access tokens; refresh token in an httpOnly cookie, rotated on every use; sessions revoked on password change, deactivation, role change. In the browser, a cookie presented twice within 30 seconds (a quick double reload) gets the same rotated tokens rather than a sign-out, unless the session has ended since; tokens sent by API clients stay strictly single-use.
 - Rate limiting on sign-in, password reset, booking lookup and payment verification.
 - Encrypted ID numbers and secrets; no card data ever stored.
 - NDPA tooling: export, anonymise, automatic retention.
@@ -335,7 +337,7 @@ Each outlet also lists the roles that may sell there (`Outlet.allowed_roles`); m
 
 All endpoints are under `/api/`. JSON in, JSON out. Full, generated reference: `/api/docs/` (requires Django-admin staff).
 
-**Authentication.** `POST /api/auth/login/` with email and password. If two-factor is on, the reply is `{mfa_required, mfa_ticket}` and the code goes to `/api/auth/login/mfa/`. Browsers send `X-Auth-Mode: cookie`: the refresh token is set as an httpOnly cookie on `/api/auth/` and the access token (15 minutes) is returned in the body and kept in memory. `POST /api/auth/refresh/` rotates the session. Other clients get both tokens in the body. Send `Authorization: Bearer <access>`.
+**Authentication.** `POST /api/auth/login/` with email and password. If two-factor is on, the reply is `{mfa_required, mfa_ticket}` and the code goes to `/api/auth/login/mfa/`. Browsers send `X-Auth-Mode: cookie`: the refresh token is set as an httpOnly cookie on `/api/auth/` and the access token (15 minutes) is returned in the body and kept in memory. `POST /api/auth/refresh/` rotates the session (browser cookies get a 30-second grace window for near-simultaneous page loads). Other clients get both tokens in the body. Send `Authorization: Bearer <access>`.
 
 **Errors.** Business-rule failures raise `DomainError` subclasses in services, which `hotel.errors.exception_handler` turns into responses: `400 {"field": ["message"]}` or `{"error": "message"}`; `409` for conflicts (room just taken, invalid status change); `403` for forbidden actions. Validation errors use DRF's usual shape.
 
@@ -400,6 +402,7 @@ All configuration comes from environment variables, read in `hotel/settings.py` 
 | `GUEST_RETENTION_DAYS`, `GUEST_ID_RETENTION_DAYS` | 6 years, 365 days | NDPA retention |
 | `FIELD_ENCRYPTION_KEYS` | (required) | Encryption keys for ID numbers and secrets. **Back them up**: data is unreadable without them. |
 | `THROTTLE_*` | see settings | Rate limits per endpoint group |
+| `CACHE_URL` | in-memory | Cache for rate limits and the refresh grace window. Set a shared cache (Redis, or `dbcache://`) when running several worker processes |
 
 Tax rates, exchange rates, rate plans, room prices and menus are **data**, edited in the staff portal under Settings.
 

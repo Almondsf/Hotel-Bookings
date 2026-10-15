@@ -15,6 +15,7 @@ from .serializers import (
     RoomTypeAvailabilitySerializer,
     RoomTypeDetailSerializer,
     RoomTypeSerializer,
+    cancellation_terms,
 )
 from .services import generate_booking_plans, get_available_rooms_for_type, rank_for_party, suggest_group_plans
 
@@ -136,7 +137,8 @@ class RoomTypeSearchView(APIView):
             }
             # Too many people for one room: ready-made groups of rooms, plus every room on sale
             # so guests can still browse what the hotel has
-            group_plans = [self._format_group_plan(plan) for plan in suggest_group_plans(check_in, check_out, adults, children)]
+            group_plans = [{**self._format_group_plan(plan), **cancellation_terms(None, check_in)}
+                           for plan in suggest_group_plans(check_in, check_out, adults, children)]
             available = [rt for rt in RoomType.objects.prefetch_related('images')
                          if get_available_rooms_for_type(rt, check_in, check_out).exists()]
             other_room_types = RoomTypeAvailabilitySerializer(
