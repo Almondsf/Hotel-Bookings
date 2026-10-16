@@ -1,0 +1,1 @@
+{% autoescape off %}{{ hotel_name }}: we look forward to seeing your group tomorrow! Check-in from {{ check_in_time }}. Group {{ group.reference }}.{% endautoescape %}

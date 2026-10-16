@@ -70,6 +70,30 @@ export interface Reservation {
   created_at: string;
 }
 
+/** Several rooms booked together, with figures for the whole group. */
+export interface BookingGroup {
+  reference: string;
+  booker: Guest;
+  notes: string;
+  created_by: string | null;
+  created_at: string;
+  bookings: Reservation[];
+  totals: {
+    rooms: number;
+    adults: number;
+    children: number;
+    total_price: string;
+    balance: string;
+    by_status: Partial<Record<BookingStatus, number>>;
+  };
+}
+
+/** What a whole-group action did to each room. */
+export interface GroupActionResponse {
+  group: BookingGroup;
+  results: { confirmation_number: string; room_number: string | null; ok: boolean; error: string }[];
+}
+
 export interface Summary {
   date: string;
   arrivals_expected: number;

@@ -1,0 +1,1 @@
+{% autoescape off %}Your group booking at {{ hotel_name }} is confirmed ({{ group.reference }}, {{ rooms|length }} rooms){% endautoescape %}

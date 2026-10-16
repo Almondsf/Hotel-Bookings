@@ -45,6 +45,7 @@ As a guest booking for a large party (say 10 adults and 4 children), I want the 
 - Below the plans I can still browse every available room and book one on its own.
 - "Book this plan" takes me to one checkout and one payment; all the rooms are held together for 15 minutes while I pay.
 - After paying I get a group reference plus a confirmation number for each room, and we split the rooms however we like.
+- I get one confirmation email listing every room (not one per room), and one reminder the day before.
 - If any room in the plan is lost because I paid too late, none of them is confirmed and my whole payment is refunded.
 - Parties that fit one room don't see plans.
 
@@ -69,10 +70,11 @@ As a guest, I want to look up and cancel my booking myself, so that I don't have
 - Before cancelling I see the policy and the exact fee if I cancel now.
 - Cancelling within the free period costs nothing; later, the policy fee applies. I receive a cancellation email.
 - If I paid online, whatever I paid beyond the fee goes back to my card automatically, and the page tells me how much. Cancelling one room of a group refunds only that room.
+- With my group reference (GR-…) and email I see every room of my group, what cancelling the rest would cost, and can cancel them all at once; I get one email for the whole group. From any one room I can jump to the whole group.
 
 **G-6 · Be reminded before arrival**
 As a guest, I want a reminder the day before I arrive, so that I have the hotel's details to hand.
-- One reminder per booking, by email (and WhatsApp if enabled), never twice.
+- One reminder per booking, by email (and WhatsApp if enabled), never twice. A group gets one reminder listing every room.
 
 **G-7 · Control my data**
 As a guest, I want my data handled lawfully, so that I can trust the hotel.
@@ -156,6 +158,13 @@ As the night receptionist, I want to run the night audit, so that the day's acco
 **R-13 · Know my guests**
 As a receptionist, I want guest profiles with history and preferences, so that I can give personal service.
 - Past and upcoming stays, notes (e.g. allergies, pillow preferences), VIP flag; VIPs are highlighted on the dashboard and room board.
+
+**R-14 · Handle a group together**
+As a receptionist, I want to see and handle all of a group's rooms together, so that a wedding party or a family isn't processed room by room.
+- Every reservation in a group links to the group page: rooms, statuses, totals, bill balances and the booker.
+- I can check in every room arriving today, check out every in-house room, or cancel every room still to come, in one step. One ID for the booker covers the group.
+- A room that can't go ahead (not clean yet, money still owed) is skipped and listed with the reason, without holding up the others; I fix it and run the action again.
+- The guest gets one email for the group: one confirmation, one thank-you with every room's invoice, one cancellation notice.
 
 ---
 

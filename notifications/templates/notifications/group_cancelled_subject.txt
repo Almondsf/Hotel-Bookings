@@ -1,0 +1,1 @@
+{% autoescape off %}Group booking {{ group.reference }} cancelled{% endautoescape %}

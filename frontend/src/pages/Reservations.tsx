@@ -62,7 +62,7 @@ export function Reservations() {
               {list.data.results.map((r) => (
                 <tr key={r.id}>
                   <td><Link to={`/reservations/${r.id}`}>{r.confirmation_number}</Link>
-                    {r.group_reference && <div className="muted" style={{ fontSize: 12 }}>{r.group_reference}</div>}</td>
+                    {r.group_reference && <div style={{ fontSize: 12 }}><Link to={`/groups/${r.group_reference}`} className="muted">{r.group_reference}</Link></div>}</td>
                   <td>{r.guest.first_name} {r.guest.last_name}{r.guest.is_vip && <span className="badge warn" style={{ marginLeft: 6 }}>VIP</span>}</td>
                   <td>{r.room_number} <span className="muted">{r.room_type_name}</span></td>
                   <td>{formatDate(r.check_in_date)}</td>

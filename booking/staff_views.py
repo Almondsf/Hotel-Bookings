@@ -14,14 +14,16 @@ from hotel.clock import business_date
 from rooms.models import Room
 from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
-from . import lifecycle
+from . import groups, lifecycle
 from .front_desk import room_board, walk_in
-from .models import Booking, Guest
+from .models import Booking, BookingGroup, Guest
 from .services import create_staff_reservation
 from .staff_serializers import (
+    BookingGroupSerializer,
     CheckInSerializer,
     CheckOutSerializer,
     GuestDetailSerializer,
+    GroupActionResponseSerializer,
     GuestProfileSerializer,
     IdentificationSerializer,
     MoveRoomSerializer,
@@ -281,3 +283,55 @@ class RoomBoardView(APIView):
     @extend_schema(summary='Every room and what is happening in it', parameters=[query('date', 'Day to show (YYYY-MM-DD); default today')], responses=ANY)
     def get(self, request):
         return Response(room_board(parse_date_param(request.query_params, 'date')))
+
+
+class BookingGroupViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    """
+    A booking group (several rooms booked together) by its reference, e.g.
+    GR-ABC123, with whole-group check-in, check-out and cancellation. Each
+    room is handled on its own, so the response lists what happened to every room.
+    """
+    serializer_class = BookingGroupSerializer
+    lookup_field = 'reference'
+    lookup_value_regex = '[A-Za-z0-9-]+'
+
+    def get_permissions(self):
+        return [HasCapability('bookings.view' if self.action == 'retrieve' else 'bookings.manage')()]
+
+    def get_queryset(self):
+        return BookingGroup.objects.select_related('booker', 'created_by')
+
+    def get_object(self):
+        self.kwargs['reference'] = self.kwargs['reference'].upper()
+        return super().get_object()
+
+    def respond(self, group, results):
+        group = self.get_queryset().get(pk=group.pk)  # fresh: statuses and balances have changed
+        return Response({'group': BookingGroupSerializer(group).data, 'results': results})
+
+    @extend_schema(summary='Check in every room of the group arriving today', request=CheckInSerializer,
+                   responses=GroupActionResponseSerializer)
+    @action(detail=True, methods=['post'], url_path='check-in')
+    def check_in(self, request, reference=None):
+        serializer = CheckInSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        group = self.get_object()
+        results = groups.check_in_group(group, identification=serializer.validated_data.get('identification'),
+                                        request=request)
+        return self.respond(group, results)
+
+    @extend_schema(summary='Check out every in-house room of the group', request=None,
+                   responses=GroupActionResponseSerializer)
+    @action(detail=True, methods=['post'], url_path='check-out')
+    def check_out(self, request, reference=None):
+        group = self.get_object()
+        return self.respond(group, groups.check_out_group(group, request=request))
+
+    @extend_schema(summary='Cancel every room of the group still to come', request=PenaltyActionSerializer,
+                   responses=GroupActionResponseSerializer)
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, reference=None):
+        serializer = PenaltyActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        group = self.get_object()
+        return self.respond(group, groups.cancel_group(group, request=request, **serializer.validated_data))

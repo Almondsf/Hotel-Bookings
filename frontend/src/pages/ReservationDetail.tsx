@@ -37,7 +37,7 @@ export function ReservationDetail() {
     <div className="stack">
       <PageHeader
         title={`${r.guest.first_name} ${r.guest.last_name}`}
-        subtitle={<>{r.confirmation_number} · <StatusBadge status={r.status} />{r.group_reference && <> · Group {r.group_reference}</>}</>}
+        subtitle={<>{r.confirmation_number} · <StatusBadge status={r.status} />{r.group_reference && <> · Group <Link to={`/groups/${r.group_reference}`}>{r.group_reference}</Link></>}</>}
         actions={manage && <>
           {r.status === 'CONFIRMED' && <button className="primary" onClick={() => setDialog('check-in')}>Check in</button>}
           {r.status === 'CHECKED_IN' && <>

@@ -166,11 +166,12 @@ def bring_folio_up_to_date(booking, *, request=None):
     return billing.folio_for(booking)
 
 
-def check_out(booking, *, transfer_to_account=None, request=None):
+def check_out(booking, *, transfer_to_account=None, request=None, notify_guest=True):
     """
     Post any unbilled room nights, then close the folio: settle it if paid,
     or bill it to `transfer_to_account` (city ledger). With
     CHECKOUT_REQUIRES_SETTLED_FOLIO, check-out is refused while money is owed.
+    `notify_guest=False` leaves the thank-you to the caller (a group check-out sends one).
     """
     with transaction.atomic():
         booking = _lock(booking)
@@ -198,7 +199,8 @@ def check_out(booking, *, transfer_to_account=None, request=None):
         mark_dirty(room, request=request, reason=f"Check-out {booking.confirmation_number}")
 
     revoke_keys(booking, reason='Checked out', request=request)
-    notify('checked_out', booking)
+    if notify_guest:
+        notify('checked_out', booking)
     early = business_date() < booking.check_out_date
     record(AuditLog.Action.BOOKING_CHECKED_OUT, request=request, target=booking,
            changes={'early_departure': early} if early else None)
@@ -225,10 +227,11 @@ def _apply_penalty(booking, penalty, waive, reason):
         booking.penalty_amount = penalty
 
 
-def cancel(booking, *, reason='', waive_penalty=False, request=None, by_guest=False):
+def cancel(booking, *, reason='', waive_penalty=False, request=None, by_guest=False, notify_guest=True):
     """
     Cancel a pending or confirmed booking, applying the cancellation policy.
     Unpaid holds are released free of charge. Only staff may waive penalties.
+    `notify_guest=False` leaves the message to the caller (a group cancellation sends one).
     """
     if by_guest and waive_penalty:
         raise BookingError("Guests cannot waive cancellation penalties.")
@@ -255,7 +258,8 @@ def cancel(booking, *, reason='', waive_penalty=False, request=None, by_guest=Fa
     # cancellation's transaction: a slow or failing gateway never blocks the cancellation itself)
     from payments.services import refund_prepaid_remainder
     refund_prepaid_remainder(booking, request=request)
-    notify('booking_cancelled', booking)
+    if notify_guest:
+        notify('booking_cancelled', booking)
     return booking
 
 

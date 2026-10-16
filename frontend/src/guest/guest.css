@@ -52,6 +52,7 @@
 .guest button.primary:hover:not(:disabled), .guest .button.primary:hover { background: var(--bronze); border-color: var(--bronze); color: #fff; }
 .guest input, .guest select, .guest textarea { border-radius: 2px; background: var(--cream); border-color: var(--line); }
 .guest .field { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--stone); font-weight: 600; }
+.guest .field .hint { text-transform: none; letter-spacing: normal; font-weight: 500; font-size: 12.5px; }
 .guest .field input, .guest .field select, .guest .field textarea { text-transform: none; letter-spacing: normal; font-weight: 500; color: var(--ink); font-size: 15px; }
 .guest .muted { color: var(--stone); }
 .guest a { color: var(--bronze); }
@@ -59,6 +60,8 @@
 
 /* ---- Booking engine (search, checkout, confirmation, manage) ------------------------------ */
 .guest-main { flex: 1; width: min(1120px, 100%); margin: 0 auto; padding: 48px 20px 72px; display: flex; flex-direction: column; gap: 28px; }
+.guest-main h1 { font-size: clamp(34px, 4.5vw, 46px); margin: 0; line-height: 1.08; }
+.guest-main .card h2 { font-size: 26px; line-height: 1.15; }
 .guest-hero h1 { font-size: clamp(36px, 5vw, 52px); margin: 0 0 18px; line-height: 1.05; }
 .guest-search { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; align-items: end;
   background: var(--cream); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow); }
@@ -89,6 +92,12 @@
 .guest-plan > strong { font-family: var(--serif); font-size: 26px; font-weight: 600; }
 .guest-plan ul, .guest-plan-rooms { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
 .guest-plan button { margin-top: auto; justify-content: center; }
+
+/* Manage-my-booking: the rooms of a group */
+.guest-group-rooms { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.guest-group-rooms li { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 0; border-bottom: 1px solid var(--line); }
+.guest-group-rooms strong { font-family: var(--serif); font-size: 19px; }
 
 @media (max-width: 760px) {
   .guest-main { padding: 32px 16px 48px; }
