@@ -154,9 +154,8 @@ def _confirm_booking_or_refund(txn):
         except DomainError as refund_error:
             _flag(txn, f"Automatic refund failed: {refund_error.message}")
         return
-    from booking.services import send_booking_confirmation
-    for booking in bookings:
-        send_booking_confirmation(booking)
+    from booking.services import send_confirmations
+    send_confirmations(bookings)
 
 
 def refund_transaction(txn, *, amount, reason, request=None, folios=None):

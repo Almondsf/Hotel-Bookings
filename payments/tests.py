@@ -5,6 +5,7 @@ from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
+from django.core import mail
 from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
@@ -330,9 +331,15 @@ class GroupBookingTests(FakeGatewayMixin, APITestCase):
         self.assertEqual(len(set(bookings.values_list('room_id', flat=True))), bookings.count())
 
         self.gateway.pay(reference)
-        verified = self.client.post(reverse('payment-verify'), {'reference': reference}, format='json').data
+        with self.captureOnCommitCallbacks(execute=True):
+            verified = self.client.post(reverse('payment-verify'), {'reference': reference}, format='json').data
         self.assertEqual(verified['status'], 'SUCCEEDED')
         self.assertEqual({b['status'] for b in verified['group']['bookings']}, {'CONFIRMED'})
+        # The booker gets one confirmation listing every room, not one email per room
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn(response.data['group_reference'], mail.outbox[0].subject)
+        for booking in bookings:
+            self.assertIn(booking.confirmation_number, mail.outbox[0].body)
 
         # One payment, split so every room's bill holds exactly its own prepayment
         txn = PaymentTransaction.objects.get(reference=reference)

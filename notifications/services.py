@@ -26,13 +26,36 @@ TEMPLATES = {
     'pre_arrival': [Channel.EMAIL, Channel.WHATSAPP],
     'checked_out': [Channel.EMAIL],
     'booking_cancelled': [Channel.EMAIL, Channel.SMS],
+    # One message for a whole group (sent against its lead booking) instead of one per room
+    'group_confirmed': [Channel.EMAIL, Channel.SMS],
+    'group_pre_arrival': [Channel.EMAIL, Channel.WHATSAPP],
+    'group_checked_out': [Channel.EMAIL],
+    'group_cancelled': [Channel.EMAIL, Channel.SMS],
+}
+Status = Booking.Status
+# Which of the group's rooms each group message lists
+GROUP_ROOMS = {
+    'group_confirmed': [Status.CONFIRMED, Status.CHECKED_IN, Status.CHECKED_OUT],
+    'group_pre_arrival': [Status.CONFIRMED],
+    'group_checked_out': [Status.CHECKED_OUT],
+    'group_cancelled': [Status.CANCELLED],
 }
 
 
-def _context(booking):
-    return {'booking': booking, 'guest': booking.guest, 'hotel_name': settings.HOTEL_NAME,
-            'hotel_phone': settings.HOTEL_PHONE, 'check_in_time': settings.HOTEL_CHECK_IN_TIME,
-            'check_out_time': settings.HOTEL_CHECK_OUT_TIME}
+def group_rooms(template, booking):
+    return list(booking.group.bookings.filter(status__in=GROUP_ROOMS[template])
+                .select_related('room__room_type').order_by('pk'))
+
+
+def _context(template, booking):
+    context = {'booking': booking, 'guest': booking.guest, 'hotel_name': settings.HOTEL_NAME,
+               'hotel_phone': settings.HOTEL_PHONE, 'check_in_time': settings.HOTEL_CHECK_IN_TIME,
+               'check_out_time': settings.HOTEL_CHECK_OUT_TIME}
+    if template in GROUP_ROOMS:
+        rooms = group_rooms(template, booking)
+        context.update(group=booking.group, rooms=rooms, rooms_total=sum(r.total_price for r in rooms),
+                       penalty_total=sum(r.penalty_amount for r in rooms))
+    return context
 
 
 def _recipient(booking, channel):
@@ -51,6 +74,8 @@ def notify(template, booking):
     """Queue `template` for the booking's guest on each configured channel (once per channel)."""
     if template not in TEMPLATES:
         raise ValueError(f"Unknown notification template {template}")
+    if template in GROUP_ROOMS and booking.group_id is None:
+        raise ValueError(f"{template} is for bookings in a group")
 
     def enqueue():
         for channel in TEMPLATES[template]:
@@ -69,12 +94,12 @@ def notify(template, booking):
 
 @task
 def deliver(notification_id):
-    notification = Notification.objects.select_related('booking__guest', 'booking__room__room_type').get(
-        pk=notification_id)
+    notification = Notification.objects.select_related(
+        'booking__guest', 'booking__room__room_type', 'booking__group').get(pk=notification_id)
     if notification.status == Notification.Status.SENT:
         return 'already sent'
     booking = notification.booking
-    context = _context(booking)
+    context = _context(notification.template, booking)
     try:
         if notification.channel == Channel.EMAIL:
             subject = render_to_string(f'notifications/{notification.template}_subject.txt', context).strip()
@@ -98,26 +123,41 @@ def deliver(notification_id):
 
 
 def _attachments(template, booking):
-    """The final invoice goes with the check-out thank-you."""
-    if template != 'checked_out':
+    """The final invoice goes with the check-out thank-you (every room's, for a group)."""
+    if template not in ('checked_out', 'group_checked_out'):
         return ()
     from billing.models import Folio
     from billing.pdf import render_invoice
 
-    folio = Folio.objects.filter(booking=booking).first()
-    invoice = folio.invoices.order_by('-issued_at').first() if folio else None
-    return [(f'{invoice.number}.pdf', render_invoice(invoice), 'application/pdf')] if invoice else ()
+    bookings = group_rooms(template, booking) if template == 'group_checked_out' else [booking]
+    attachments = []
+    for folio in Folio.objects.filter(booking__in=bookings).order_by('booking_id'):
+        invoice = folio.invoices.order_by('-issued_at').first()
+        if invoice:
+            attachments.append((f'{invoice.number}.pdf', render_invoice(invoice), 'application/pdf'))
+    return attachments
 
 
 @task
 def send_pre_arrival_reminders():
-    """Remind guests arriving tomorrow. Safe to run often: each booking is reminded once."""
+    """
+    Remind guests arriving tomorrow. Safe to run often: each booking is
+    reminded once, and a group gets one reminder (on its first room) listing every room.
+    """
     from hotel.clock import business_date
 
     tomorrow = business_date() + timedelta(days=1)
-    bookings = Booking.objects.filter(status=Booking.Status.CONFIRMED, check_in_date=tomorrow).select_related('guest')
+    bookings = (Booking.objects.filter(status=Booking.Status.CONFIRMED, check_in_date=tomorrow)
+                .select_related('guest').order_by('pk'))
+    reminded_groups = set()
     for booking in bookings:
-        notify('pre_arrival', booking)
+        if booking.group_id is None:
+            notify('pre_arrival', booking)
+        elif booking.group_id not in reminded_groups:
+            reminded_groups.add(booking.group_id)
+            # Checked group-wide: the first room may have changed since an earlier run (one cancelled)
+            if not Notification.objects.filter(template='group_pre_arrival', booking__group_id=booking.group_id).exists():
+                notify('group_pre_arrival', booking)
     return bookings.count()
 
 

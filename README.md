@@ -6,7 +6,7 @@ A property management system for a full-service hotel, built for Nigerian operat
 
 | Area | Highlights |
 |---|---|
-| Reservations | Online and staff bookings, group/multi-room, rate plans (BAR, packages, corporate, promo codes), modifications with re-pricing, configurable cancellation & no-show policy, expiring payment holds |
+| Reservations | Online and staff bookings, group/multi-room (one email per group; check in, check out or cancel the whole group, by staff or, for cancelling, the guest online), rate plans (BAR, packages, corporate, promo codes), modifications with re-pricing, configurable cancellation & no-show policy, expiring payment holds |
 | Front desk | Room board, walk-ins, check-in with encrypted ID capture, room moves, key cards, check-out |
 | Billing | Guest folios, nightly room posting, extras, voids & allowances with reasons, split bills, NGN + foreign-currency payments, refunds, city ledger (corporate accounts), gapless invoice numbering, PDF invoices |
 | Payments | Paystack & Flutterwave checkout, signed webhooks, server-side verification, automatic refund when a late payment can't get a room |

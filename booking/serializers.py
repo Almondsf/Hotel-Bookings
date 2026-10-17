@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
@@ -10,7 +12,7 @@ from rooms.models import RoomType
 from rooms.services import get_available_rooms_for_type
 
 from .exceptions import BookingError
-from .models import Booking, Guest
+from .models import Booking, BookingGroup, Guest
 from .policies import cancellation_penalty, describe_cancellation_policy, free_cancellation_deadline
 from .validation import validate_stay
 
@@ -172,11 +174,13 @@ class BookingConfirmationSerializer(RatePlanInfoMixin, TaxQuoteMixin, Cancellati
     room_type_name = serializers.CharField(source='room.room_type.name', read_only=True)
     payments = PaymentSerializer(source='payment_transactions', many=True, read_only=True)
     refunded = serializers.SerializerMethodField(help_text="Paid back to the guest from this booking's bill")
+    group_reference = serializers.CharField(source='group.reference', default=None, read_only=True,
+                                            help_text="Set when the room was booked as part of a group")
 
     class Meta:
         model = Booking
         fields = [
-            'confirmation_number', 'guest', 'room_number', 'room_type_name', 'rate_plan',
+            'confirmation_number', 'group_reference', 'guest', 'room_number', 'room_type_name', 'rate_plan',
             'check_in_date', 'check_out_date', 'number_of_adults', 'number_of_children',
             'price_per_night', 'total_price', 'taxes', 'total_with_taxes', 'status', 'payments', 'refunded',
             'cancellation_policy', 'free_cancellation_until', 'cancellation_fee_if_cancelled_now',
@@ -213,3 +217,60 @@ class GuestBookingAccessSerializer(serializers.Serializer):
 
 class GuestCancelSerializer(GuestBookingAccessSerializer):
     reason = serializers.CharField(max_length=500, required=False, allow_blank=True, default='')
+
+
+class GuestGroupAccessSerializer(serializers.Serializer):
+    """Guests manage a whole group with its reference (GR-...) and the booker's email."""
+    reference = serializers.CharField(max_length=20)
+    email = serializers.EmailField()
+
+    def validate(self, data):
+        data['group'] = (
+            BookingGroup.objects.select_related('booker')
+            .filter(reference=data['reference'].strip().upper(), booker__email__iexact=data['email'].strip())
+            .first()
+        )
+        return data
+
+
+class GuestGroupCancelSerializer(GuestGroupAccessSerializer):
+    reason = serializers.CharField(max_length=500, required=False, allow_blank=True, default='')
+
+
+class GuestGroupSerializer(serializers.ModelSerializer):
+    """A group as its booker sees it: every room, and what the whole group costs or would cost to cancel."""
+    bookings = serializers.SerializerMethodField()
+    totals = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BookingGroup
+        fields = ['reference', 'bookings', 'totals']
+
+    def _rooms(self, obj):
+        if not hasattr(obj, '_rooms'):
+            obj._rooms = list(obj.bookings.select_related('guest', 'room__room_type', 'group', 'rate_plan', 'folio')
+                              .prefetch_related('payment_transactions').order_by('pk'))
+        return obj._rooms
+
+    @extend_schema_field(BookingConfirmationSerializer(many=True))
+    def get_bookings(self, obj):
+        if not hasattr(obj, '_rooms_data'):
+            obj._rooms_data = BookingConfirmationSerializer(self._rooms(obj), many=True).data
+        return obj._rooms_data
+
+    @extend_schema_field(serializers.DictField())
+    def get_totals(self, obj) -> dict:
+        rooms = self.get_bookings(obj)
+        live = [r for r in rooms if r['status'] != Booking.Status.CANCELLED]
+        fees = [r['cancellation_fee_if_cancelled_now'] for r in rooms if r['cancellation_fee_if_cancelled_now'] is not None]
+
+        def total(values):
+            return f"{sum((Decimal(v) for v in values), Decimal('0')):.2f}"
+        return {
+            'rooms': len(live),
+            'total_with_taxes': total(r['total_with_taxes'] for r in live),
+            # What cancelling every room still to come would cost now (None when nothing can be cancelled)
+            'cancellation_fee_if_cancelled_now': total(fees) if fees else None,
+            'cancellable_rooms': len(fees),
+            'refunded': total(r['refunded'] for r in rooms),
+        }

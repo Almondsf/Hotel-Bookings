@@ -1,0 +1,11 @@
+{% autoescape off %}Dear {{ guest.first_name }},
+
+Your group booking {{ group.reference }} ({{ booking.check_in_date|date:"j F Y" }} to {{ booking.check_out_date|date:"j F Y" }}) has been cancelled.
+
+{% for room in rooms %}- {{ room.confirmation_number }}  {{ room.room.room_type.name }}{% if room.penalty_amount %}  cancellation charge NGN {{ room.penalty_amount }}{% endif %}
+{% endfor %}
+{% if penalty_total %}Cancellation charges of NGN {{ penalty_total }} apply under the booking's cancellation policy; any balance paid will be refunded.
+{% else %}No cancellation charge applies.
+{% endif %}
+{{ hotel_name }}
+{% endautoescape %}

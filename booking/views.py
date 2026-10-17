@@ -5,13 +5,18 @@ from rest_framework.response import Response
 
 from audit.models import AuditLog
 from audit.services import record
+from hotel.schema import extend_schema
 
-from . import lifecycle
+from . import groups, lifecycle
+from .models import BookingGroup
 from .services import create_online_booking, create_online_group_booking
 from .serializers import (
     BookingConfirmationSerializer,
     BookingCreateSerializer,
     GroupBookingCreateSerializer,
+    GuestGroupAccessSerializer,
+    GuestGroupCancelSerializer,
+    GuestGroupSerializer,
     GuestBookingAccessSerializer,
     GuestCancelSerializer,
 )
@@ -100,3 +105,39 @@ class GuestCancelBookingView(GuestBookingView):
             return not_found()
         booking = lifecycle.cancel(data['booking'], reason=data['reason'], request=request, by_guest=True)
         return Response(BookingConfirmationSerializer(booking).data)
+
+
+def group_not_found():
+    return Response({"error": "Group booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+
+class GroupLookupView(GuestBookingView):
+    """A group booking with every room in it, by group reference + the booker's email."""
+    serializer_class = GuestGroupAccessSerializer
+
+    @extend_schema(summary='Look up a group booking', responses=GuestGroupSerializer)
+    def post(self, request, *args, **kwargs):
+        data = self.validated(request)
+        if data is None:
+            return Response({"error": "Both reference and a valid email are required."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if data['group'] is None:
+            return group_not_found()
+        return Response(GuestGroupSerializer(data['group']).data)
+
+
+class GuestCancelGroupView(GuestBookingView):
+    """Cancel every room of a group still to come, under the cancellation policy (one email for all)."""
+    serializer_class = GuestGroupCancelSerializer
+
+    @extend_schema(summary='Cancel a whole group booking', responses=GuestGroupSerializer)
+    def post(self, request, *args, **kwargs):
+        data = self.validated(request)
+        if data is None:
+            return Response({"error": "Both reference and a valid email are required."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if data['group'] is None:
+            return group_not_found()
+        groups.cancel_group(data['group'], reason=data['reason'], request=request, by_guest=True)
+        group = BookingGroup.objects.get(pk=data['group'].pk)
+        return Response(GuestGroupSerializer(group).data)

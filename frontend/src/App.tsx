@@ -29,6 +29,7 @@ const Folios = lazy(() => import('./pages/Folios').then((m) => ({ default: m.Fol
 const Accounts = lazy(() => import('./pages/Accounts').then((m) => ({ default: m.Accounts })));
 const Settings = lazy(() => import('./pages/Settings').then((m) => ({ default: m.Settings })));
 const AccountDetail = lazy(() => import('./pages/Accounts').then((m) => ({ default: m.AccountDetail })));
+const GroupDetail = lazy(() => import('./pages/GroupDetail').then((m) => ({ default: m.GroupDetail })));
 const GuestDetail = lazy(() => import('./pages/Guests').then((m) => ({ default: m.GuestDetail })));
 const Guests = lazy(() => import('./pages/Guests').then((m) => ({ default: m.Guests })));
 const NewReservation = lazy(() => import('./pages/NewReservation').then((m) => ({ default: m.NewReservation })));
@@ -81,6 +82,7 @@ export function App() {
         <Route path="reservations" element={<Guard capability="bookings.view"><Reservations /></Guard>} />
         <Route path="reservations/new" element={<Guard capability="bookings.manage"><NewReservation /></Guard>} />
         <Route path="reservations/:id" element={<Guard capability="bookings.view"><ReservationDetail /></Guard>} />
+        <Route path="groups/:reference" element={<Guard capability="bookings.view"><GroupDetail /></Guard>} />
         <Route path="guests" element={<Guard capability="bookings.view"><Guests /></Guard>} />
         <Route path="guests/:id" element={<Guard capability="bookings.view"><GuestDetail /></Guard>} />
         <Route path="folios" element={<Guard capability="folios.view"><Folios /></Guard>} />

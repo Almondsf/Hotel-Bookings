@@ -32,6 +32,9 @@ const backendEnv = {
   // Every test signs in from the same address
   THROTTLE_LOGIN_IP: '1000/min',
   THROTTLE_LOGIN_EMAIL: '1000/hour',
+  // Never reach a real gateway with keys from a developer's .env: the tests expect online payment to be off
+  PAYSTACK_SECRET_KEY: '',
+  FLUTTERWAVE_SECRET_KEY: '',
 } as Record<string, string>;
 
 export default defineConfig<Options>({

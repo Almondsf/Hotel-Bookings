@@ -46,6 +46,16 @@ def send_booking_confirmation(booking):
     notify('booking_confirmed', booking)
 
 
+def send_confirmations(bookings):
+    """Confirm bookings made together: one message per room, or a single one listing a group's rooms."""
+    grouped = [b for b in bookings if b.group_id]
+    for booking in bookings:
+        if not booking.group_id:
+            send_booking_confirmation(booking)
+    if grouped:
+        notify('group_confirmed', grouped[0])
+
+
 def create_online_booking(validated_data):
     """
     Online booking: hold a room and start a gateway checkout. The booking is
@@ -253,5 +263,5 @@ def create_staff_reservation(*, guest, rooms, check_in_date, check_out_date, spe
                         'rate_plan': rate_plan.code if rate_plan else 'BAR',
                         'rate_override': str(rate_override) if rate_override is not None else None,
                         'override_reason': override_reason or None})
-        send_booking_confirmation(booking)
+    send_confirmations(bookings)
     return bookings

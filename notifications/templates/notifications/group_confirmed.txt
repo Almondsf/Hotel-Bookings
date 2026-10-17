@@ -1,0 +1,19 @@
+{% autoescape off %}Dear {{ guest.first_name }},
+
+Thank you for choosing {{ hotel_name }}. Your group booking is confirmed.
+
+Group reference: {{ group.reference }}
+Arrival:         {{ booking.check_in_date|date:"l j F Y" }} (from {{ check_in_time }})
+Departure:       {{ booking.check_out_date|date:"l j F Y" }} (by {{ check_out_time }})
+
+Your rooms:
+{% for room in rooms %}- {{ room.confirmation_number }}  {{ room.room.room_type.name }}, {{ room.number_of_adults }} adult{{ room.number_of_adults|pluralize }}{% if room.number_of_children %}, {{ room.number_of_children }} child{{ room.number_of_children|pluralize:"ren" }}{% endif %}  NGN {{ room.total_price }}
+{% endfor %}
+Rooms total:     NGN {{ rooms_total }} (before taxes)
+
+Everyone in the group should bring a valid ID (passport, NIN, driver's licence or voter's card) for check-in.
+You can view or cancel the whole group online with the group reference and your email, or one room with its own confirmation number.
+
+We look forward to welcoming you.
+{{ hotel_name }}{% if hotel_phone %} · {{ hotel_phone }}{% endif %}
+{% endautoescape %}

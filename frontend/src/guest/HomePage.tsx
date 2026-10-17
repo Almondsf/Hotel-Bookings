@@ -78,10 +78,10 @@ export function BookingBar({ defaultAdults = 2 }: { defaultAdults?: number }) {
   );
 }
 
-function SectionHead({ kicker, title, children }: { kicker: string; title: string; children?: ReactNode }) {
+function SectionHead({ kicker, title, number, children }: { kicker: string; title: string; number?: string; children?: ReactNode }) {
   return (
     <header className="home-head">
-      <span className="home-kicker">{kicker}</span>
+      <span className="home-kicker">{number && <span className="home-num">{number}</span>}{kicker}</span>
       <h2>{title}</h2>
       {children && <p className="muted">{children}</p>}
     </header>
@@ -109,6 +109,7 @@ function HeroSlider() {
              aria-hidden={i !== index} />
       ))}
       <div className="home-hero-inner">
+        <span className="home-hero-kicker">Victoria Island · Lagos</span>
         <h1 key={slide.title}>{slide.title}</h1>
         <p className="home-tagline">{slide.text}</p>
         <div className="row">
@@ -120,6 +121,10 @@ function HeroSlider() {
               onClick={() => setIndex((index - 1 + count) % count)}>‹</button>
       <button type="button" className="home-arrow next" aria-label="Next slide"
               onClick={() => setIndex((index + 1) % count)}>›</button>
+      <div className="home-hero-count" aria-hidden="true">
+        <strong>{String(index + 1).padStart(2, '0')}</strong> / {String(count).padStart(2, '0')}
+      </div>
+      <a className="home-scroll" href="#welcome" aria-label="Scroll to content"><span /></a>
       <div className="home-dots">
         {HERO_SLIDES.map((s, i) => (
           <button type="button" key={s.image} aria-label={`Slide ${i + 1}`} aria-current={i === index}
@@ -138,6 +143,7 @@ function RoomCard({ room }: { room: RoomTypeInfo }) {
         {image ? <img src={sized(image.image_url, 900)} alt={image.description || room.name} loading="lazy" />
           : <div className="guest-room-placeholder" aria-hidden="true" />}
         {room.images.length > 1 && <span className="home-photo-count">{room.images.length} photos</span>}
+        <span className="home-price-tag">from <strong>{formatMoney(room.base_price)}</strong> / night</span>
       </Link>
       <div className="home-room-body">
         <h3><Link to={`/rooms/${room.slug}`}>{room.name}</Link></h3>
@@ -210,10 +216,13 @@ export function HomePage() {
       <div className="home-booking-wrap"><BookingBar /></div>
 
       <div className="home-content">
-        <section className="home-split">
-          <img src={WELCOME.image} alt="" loading="lazy" />
+        <section className="home-split" id="welcome">
+          <figure className="home-split-media">
+            <img src={WELCOME.image} alt="" loading="lazy" />
+            <figcaption><strong>24/7</strong> power, every room</figcaption>
+          </figure>
           <div>
-            <SectionHead kicker={WELCOME.kicker} title={`${WELCOME.title}`} />
+            <SectionHead number="01" kicker={WELCOME.kicker} title={`${WELCOME.title}`} />
             {WELCOME.paragraphs.map((p) => <p key={p.slice(0, 20)}>{p}</p>)}
             <ul className="home-highlights">
               {HIGHLIGHTS.map((h) => <li key={h.title}><strong>{h.title}</strong><span className="muted">{h.text}</span></li>)}
@@ -222,7 +231,7 @@ export function HomePage() {
         </section>
 
         <section id="rooms" className="home-section">
-          <SectionHead kicker="Stay" title="Rooms & suites">
+          <SectionHead number="02" kicker="Stay" title="Rooms & suites">
             {cheapest !== null ? `${rooms.data?.length} room types from ${formatMoney(cheapest)} a night. Rates exclude VAT and service charge.` : null}
           </SectionHead>
           <ErrorAlert error={rooms.error} />
@@ -231,7 +240,7 @@ export function HomePage() {
         </section>
 
         <section id="offers" className="home-section">
-          <SectionHead kicker="Offers" title="Packages & special rates">
+          <SectionHead number="03" kicker="Offers" title="Packages & special rates">
             Choose these when you search: the booking page shows each rate with its conditions.
           </SectionHead>
           <div className="home-offers">
@@ -247,14 +256,14 @@ export function HomePage() {
         </section>
 
         <section id="dining" className="home-section">
-          <SectionHead kicker="Eat & drink" title="Dining & lounges" />
-          <div className="home-cards">
+          <SectionHead number="04" kicker="Eat & drink" title="Dining & lounges" />
+          <div className="home-dining">
             {DINING.map((d) => (
-              <article className="card home-card" key={d.title}>
+              <article className="home-dine-row" key={d.title}>
                 <img src={d.image} alt="" loading="lazy" />
                 <div>
                   <h3>{d.title}</h3>
-                  <div className="muted home-hours">{d.hours}</div>
+                  <div className="home-hours">{d.hours}</div>
                   <p>{d.text}</p>
                 </div>
               </article>
@@ -263,10 +272,10 @@ export function HomePage() {
         </section>
 
         <section id="facilities" className="home-section">
-          <SectionHead kicker="Relax" title="Facilities & wellness" />
-          <div className="home-cards">
+          <SectionHead number="05" kicker="Relax" title="Facilities & wellness" />
+          <div className="home-cards home-tiles">
             {FACILITIES.map((f) => (
-              <article className="card home-card" key={f.title}>
+              <article className="home-card home-tile" key={f.title}>
                 <img src={f.image} alt="" loading="lazy" />
                 <div><h3>{f.title}</h3><p>{f.text}</p></div>
               </article>
@@ -286,7 +295,7 @@ export function HomePage() {
 
       <div className="home-content">
         <section className="home-section">
-          <SectionHead kicker="Guest stories" title="What our guests say" />
+          <SectionHead number="06" kicker="Guest stories" title="What our guests say" />
           <div className="home-quotes">
             {TESTIMONIALS.map((t) => (
               <figure className="card home-quote" key={t.name}>
@@ -299,7 +308,7 @@ export function HomePage() {
         </section>
 
         <section id="gallery" className="home-section">
-          <SectionHead kicker="Gallery" title="Take a look around" />
+          <SectionHead number="07" kicker="Gallery" title="Take a look around" />
           <Gallery />
         </section>
 

@@ -84,3 +84,43 @@ test('point of sale: tapping an item starts an order, then pay in cash', async (
   await modal(page).getByRole('button', { name: 'Complete sale' }).click();
   await expect(page.locator('.alert.success')).toContainText('settled');
 });
+
+test('a two-room group: staff see it together, and the guest cancels the whole group online', async ({ page }) => {
+  const last = `Group${unique()}`;
+  const email = `${last.toLowerCase()}@example.com`;
+  const arrival = addDays(new Date().toISOString().slice(0, 10), 75);
+  await page.goto('/reservations/new');
+  await page.waitForLoadState('networkidle');
+  await field(page, 'First name').fill('Funke');
+  await field(page, 'Last name').fill(last);
+  await field(page, 'Email').fill(email);
+  await field(page, 'Arrival').fill(arrival);
+  await field(page, 'Departure').fill(addDays(arrival, 2));
+  await page.getByRole('button', { name: 'Add another room' }).click();
+  for (const select of await page.locator('label.field', { hasText: /^\s*Room type/ }).locator('select').all()) {
+    await select.selectOption({ index: 1 });
+  }
+  await page.getByRole('button', { name: 'Create reservation' }).click();
+  await expect(page).toHaveURL(/\/reservations\/\d+$/);
+
+  // The reservation links to its group, which lists both rooms
+  await page.getByRole('link', { name: /^GR-/ }).click();
+  await expect(page).toHaveURL(/\/groups\/GR-[A-Z0-9]+$/);
+  const reference = page.url().split('/').pop()!;
+  await expect(page.locator('tbody tr')).toHaveCount(2);
+  await expect(page.getByRole('button', { name: 'Cancel group' })).toBeVisible();
+
+  // The booker manages the whole group with its reference
+  await page.goto('/booking/manage');
+  await field(page, 'Confirmation number').fill(reference);
+  await field(page, 'Email used to book').fill(email);
+  await page.getByRole('button', { name: 'Find booking' }).click();
+  await expect(page.getByRole('heading', { name: `Group ${reference}` })).toBeVisible();
+  await expect(page.locator('.guest-group-rooms li')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Cancel group' }).click();
+  await expect(page.locator('.guest-group-rooms .badge', { hasText: 'cancelled' })).toHaveCount(2);
+
+  await page.goto(`/groups/${reference}`);
+  await expect(page.locator('tbody .badge', { hasText: 'Cancelled' })).toHaveCount(2);
+  await expect(page.getByRole('button', { name: 'Cancel group' })).toHaveCount(0);
+});

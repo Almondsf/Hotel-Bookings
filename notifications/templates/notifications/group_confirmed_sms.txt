@@ -1,0 +1,1 @@
+{% autoescape off %}{{ hotel_name }}: group {{ group.reference }} confirmed, {{ rooms|length }} rooms for {{ booking.check_in_date|date:"j M" }}-{{ booking.check_out_date|date:"j M" }}. Everyone needs a valid ID at check-in.{% endautoescape %}

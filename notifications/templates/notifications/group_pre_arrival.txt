@@ -1,0 +1,13 @@
+{% autoescape off %}Dear {{ guest.first_name }},
+
+We look forward to welcoming your group tomorrow, {{ booking.check_in_date|date:"l j F" }}.
+Check-in is from {{ check_in_time }}. Everyone in the group should bring a valid ID.
+
+Group reference: {{ group.reference }}
+{% for room in rooms %}- {{ room.confirmation_number }}  {{ room.room.room_type.name }}
+{% endfor %}{% if booking.special_requests %}Your requests: {{ booking.special_requests }}
+{% endif %}
+Need airport pickup or an early check-in? Just reply to this email{% if hotel_phone %} or call {{ hotel_phone }}{% endif %}.
+
+{{ hotel_name }}
+{% endautoescape %}

@@ -6,7 +6,7 @@ from rooms.models import Room, RoomType
 
 from django.utils import timezone
 
-from .models import Booking, Guest, GuestIdentification
+from .models import Booking, BookingGroup, Guest, GuestIdentification
 from rates.models import RatePlan
 
 from .serializers import CancellationInfoMixin, PaymentSerializer, RatePlanInfoMixin, TaxQuoteMixin
@@ -195,3 +195,54 @@ class WalkInSerializer(serializers.Serializer):
         if bool(data.get('existing_guest')) == bool(data.get('guest')):
             raise serializers.ValidationError("Provide either guest_id (existing guest) or guest (new guest).")
         return data
+
+
+class GroupActionResultSerializer(serializers.Serializer):
+    """What a whole-group action did to one room."""
+    confirmation_number = serializers.CharField()
+    room_number = serializers.CharField(allow_null=True)
+    ok = serializers.BooleanField()
+    error = serializers.CharField(allow_blank=True, help_text="Why this room was skipped (empty when ok).")
+
+
+class BookingGroupSerializer(serializers.ModelSerializer):
+    """A group with every room in it and the figures the desk needs at a glance."""
+    booker = GuestProfileSerializer(read_only=True)
+    created_by = serializers.EmailField(source='created_by.email', default=None, read_only=True)
+    bookings = serializers.SerializerMethodField()
+    totals = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BookingGroup
+        fields = ['reference', 'booker', 'notes', 'created_by', 'created_at', 'bookings', 'totals']
+        read_only_fields = fields
+
+    def _bookings(self, obj):
+        if not hasattr(obj, '_rooms'):
+            obj._rooms = list(
+                obj.bookings.select_related('guest', 'room__room_type', 'group', 'created_by', 'folio', 'rate_plan')
+                .prefetch_related('payment_transactions').order_by('pk'))
+        return obj._rooms
+
+    @extend_schema_field(ReservationSerializer(many=True))
+    def get_bookings(self, obj):
+        return ReservationSerializer(self._bookings(obj), many=True).data
+
+    @extend_schema_field(serializers.DictField())
+    def get_totals(self, obj) -> dict:
+        rooms = self._bookings(obj)
+        live = [b for b in rooms if b.status != Booking.Status.CANCELLED]
+        balance = sum((b.folio.balance for b in rooms if hasattr(b, 'folio')), 0)
+        return {
+            'rooms': len(live),
+            'adults': sum(b.number_of_adults for b in live),
+            'children': sum(b.number_of_children for b in live),
+            'total_price': f"{sum((b.total_price for b in live), 0):.2f}",
+            'balance': f"{balance:.2f}",
+            'by_status': {s: sum(1 for b in rooms if b.status == s) for s in {b.status for b in rooms}},
+        }
+
+
+class GroupActionResponseSerializer(serializers.Serializer):
+    group = BookingGroupSerializer()
+    results = GroupActionResultSerializer(many=True)

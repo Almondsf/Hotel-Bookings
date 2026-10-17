@@ -79,6 +79,9 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 ## 4. Features by area
 
 ### Public website and booking engine
+- Look: "warm luxury". Ink, sand and cream with bronze-gold accents, Cormorant Garamond headings over Manrope text (Google Fonts, loaded in `frontend/index.html`). The tokens live on `.guest` in `frontend/src/guest/guest.css`, so the shared buttons, fields and cards take on the look; the page layouts are in `home.css`. Dark mode follows the device setting.
+- On the home page the header floats over the full-screen hero and turns solid once you scroll; on phones and small tablets the links fold into a Menu button. Every public page ends with a "Come and stay with us" band before the footer.
+- The public site can be indexed by search engines; staff pages add `noindex` while they are open.
 - Home page with hero slideshow, booking bar, rooms with photos and "rates from" prices, offers, dining, facilities, events, testimonials, gallery with lightbox, contact and policies. Marketing copy lives in `frontend/src/guest/content.ts`.
 - Room detail pages with photo gallery, amenities, capacity and a booking box.
 - Availability search by dates and party size, showing every bookable rate plan with its total including taxes and its cancellation terms. Promo codes unlock hidden rates.
@@ -87,11 +90,13 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 - Checkout: guest details, marketing consent (never pre-ticked), acceptance of the cancellation policy, then the Paystack or Flutterwave payment page. The room (or every room of a group plan) is held for `BOOKING_HOLD_MINUTES` (15) while the guest pays.
 - Payment return page that verifies the payment with the gateway before confirming.
 - Manage-my-booking: look up by confirmation number + email, see the policy and the fee if cancelled now, cancel. What was prepaid online beyond the fee goes back to the card automatically, and the page says how much.
+- A group is managed the same way with its group reference (GR-…) and the booker's email: every room with its status, the total, the fee for cancelling every room still to come, and one button to cancel them all. A room looked up on its own offers "Manage the whole group".
 - Each rate in the results states when free cancellation ends for the dates searched (or that it has already passed, or that the rate is non-refundable), and checkout repeats it before the guest pays.
 - If no payment gateway is configured, checkout explains how to book by phone or email instead.
 
 ### Reservations
 - Staff bookings for one or many rooms (a group), from phone, email, walk-in, corporate, travel agent or OTA.
+- **Group page** (`/groups/<reference>`, linked from each of its reservations): every room with status, total and bill balance, the booker, and the group's totals. Staff check in every room arriving today, check out every in-house room, or cancel every room still to come, in one step (`booking/groups.py`). Each room goes through the normal rules on its own, so a room that isn't clean or still owes money is skipped and listed with the reason while the others go ahead; running the action again picks it up. One ID document recorded for the booker covers the group.
 - Choice of rate plan, company account, a specific room, and (managers only) an agreed nightly rate with a reason.
 - Automatic room allocation that never double-books (row locks on the room type during allocation).
 - Changing dates, room type, party size or requests, with re-pricing and availability re-checked. In-house guests can extend or shorten.
@@ -143,6 +148,7 @@ There is also the **Django admin** (`/admin/` by default; change `DJANGO_ADMIN_U
 ### Guest communication
 - Email always; SMS and WhatsApp through Termii when enabled and the guest hasn't opted out.
 - Messages: booking confirmed, pre-arrival reminder, checked out, booking cancelled. Each is sent at most once per booking per channel.
+- A group gets **one** message instead of one per room (`group_confirmed`, `group_pre_arrival`, `group_checked_out`, `group_cancelled`), sent against its first room and listing every room; the group check-out email carries every room's invoice. Single rooms of a group handled on their own (one room cancelled or checked out by itself) still get the single-room message.
 
 ### Security and compliance
 - Two-factor sign-in (authenticator app + recovery codes), required for admin, manager and accountant when `ENFORCE_MFA=True`.
@@ -282,7 +288,7 @@ stateDiagram-v2
 1. When no single room fits the party, the search also returns `group_plans` (`rooms.services.suggest_group_plans`: combinations within real availability, each room with at least one adult) and `other_room_types` (everything on sale).
 2. `POST /api/bookings/create-group/` (`booking.services.create_online_group_booking`) locks the room types, allocates every room, and creates one `BookingGroup` with a `PENDING` booking and folio per room, all on the same hold. One gateway checkout covers the total; the first room's booking carries the transaction.
 3. On verification, `payments.services.confirm_payment` splits the single payment so each room's folio receives exactly its own prepaid amount (the lead folio absorbs any rounding), then confirms **all rooms in one transaction**. If any room was lost after the hold lapsed, nothing is confirmed and the whole payment is refunded, drawn from each folio's credit.
-4. Each room keeps its own confirmation number; the guest sees the group reference and every room on the payment-complete page.
+4. Each room keeps its own confirmation number; the guest sees the group reference and every room on the payment-complete page, and gets one confirmation email listing every room.
 
 ### Stay and billing
 1. **Check-in** (`lifecycle.check_in`): ID recorded if needed, room must be clean and free, booking → `CHECKED_IN`, folio opened, room → `OCCUPIED`, audit entry.
@@ -345,9 +351,9 @@ All endpoints are under `/api/`. JSON in, JSON out. Full, generated reference: `
 
 | Area | Endpoints |
 |---|---|
-| Public | `GET hotel/` (name, contacts, times, policy, enabled gateways) · `GET rooms/types/`, `rooms/<slug>/`, `rooms/search/` (ranked; `group_plans` and `other_room_types` for large parties) · `POST bookings/create/`, `bookings/create-group/`, `bookings/lookup/`, `bookings/cancel/` · `POST payments/verify/` · gateway and Channex webhooks |
+| Public | `GET hotel/` (name, contacts, times, policy, enabled gateways) · `GET rooms/types/`, `rooms/<slug>/`, `rooms/search/` (ranked; `group_plans` and `other_room_types` for large parties) · `POST bookings/create/`, `bookings/create-group/`, `bookings/lookup/`, `bookings/cancel/`, `bookings/group/lookup/`, `bookings/group/cancel/` · `POST payments/verify/` · gateway and Channex webhooks |
 | Auth & staff | `auth/login/`, `login/mfa/`, `refresh/`, `logout/`, `me/`, `change-password/`, `password-reset/`, `password-reset/confirm/`, `mfa/setup|enable|disable/` · `staff/` (+ `deactivate`, `reactivate`, `resend-invite`, `reset-mfa`) |
-| Reservations | `reservations/` (list with filters `status`, `arrival`, `departure`, `in_house`, `q`; create) · `reservations/<id>/` (get, PATCH to modify) · `reservations/<id>/check-in|check-out|cancel|no-show|move-room|post-room-charges/` · `reservations/summary/` · `front-desk/walk-in/`, `front-desk/room-board/` · `guests/` (+ `identifications`, `reveal`) |
+| Reservations | `reservations/` (list with filters `status`, `arrival`, `departure`, `in_house`, `q`; create) · `reservations/<id>/` (get, PATCH to modify) · `reservations/<id>/check-in|check-out|cancel|no-show|move-room|post-room-charges/` · `reservations/summary/` · `groups/<reference>/` (+ `check-in`, `check-out`, `cancel` for the whole group) · `front-desk/walk-in/`, `front-desk/room-board/` · `guests/` (+ `identifications`, `reveal`) |
 | Rooms | `rooms/all/` · `rooms/all/<id>/` (PATCH) · `rooms/types/<id>/` (PATCH) · `rooms/create/`, `rooms/create-room-type/` |
 | Rates | `rates/plans/`, `rates/prices/`, `rates/restrictions/` |
 | Billing | `billing/folios/` (+ `charges`, `charges/<id>/void|transfer`, `payments`, `payments/<id>/void`, `refunds`, `settle`, `transfer-to-account`) · `billing/invoices/` (+ `pdf`) · `billing/accounts/` (+ `payments`, `statement`) · `billing/tax-rules/`, `billing/exchange-rates/` |
@@ -364,7 +370,7 @@ Periodic jobs (`PERIODIC_JOBS` in settings), run by the worker:
 | Job | Every | Does |
 |---|---|---|
 | `expire-payment-holds` | 1 min | Cancel unpaid online bookings whose hold has lapsed |
-| `pre-arrival-reminders` | 1 h | Email/WhatsApp guests arriving tomorrow (once per booking) |
+| `pre-arrival-reminders` | 1 h | Email/WhatsApp guests arriving tomorrow (once per booking; once per group) |
 | `housekeeping-task-list` | 1 h | Generate today's cleaning tasks |
 | `channel-pull-bookings` | 2 min | Fetch OTA bookings the webhook may have missed |
 | `channel-full-sync` | 6 h | Republish availability, rates and restrictions |
@@ -460,7 +466,7 @@ cd frontend && npm install && npm run dev         # http://localhost:3000
 |---|---|
 | `python manage.py test` | Backend test suite (≈255 tests) |
 | `npm test` / `npm run typecheck` (in `frontend/`) | Frontend unit tests / TypeScript check (app and browser tests) |
-| `npm run e2e` (in `frontend/`) | Browser tests (Playwright): starts its own Django (port 8100) and Vite (port 3100) with a throwaway `e2e.sqlite3` seeded by `seed_demo`. Set `PYTHON` to the Python with the backend installed and, on Windows, `PW_CHANNEL=msedge` to use the installed Edge (the two file-download tests are skipped there, because Edge opens an extra internal page on download that Playwright reports as closed; CI runs them in Chromium). Takes several minutes. |
+| `npm run e2e` (in `frontend/`) | Browser tests (Playwright): starts its own Django (port 8100) and Vite (port 3100) with a throwaway `e2e.sqlite3` seeded by `seed_demo`. Gateway keys are blanked for that server, so keys in your `.env` are never used and the tests see online payment switched off. Set `PYTHON` to the Python with the backend installed and, on Windows, `PW_CHANNEL=msedge` to use the installed Edge (the two file-download tests are skipped there, because Edge opens an extra internal page on download that Playwright reports as closed; CI runs them in Chromium). Takes several minutes. |
 | `python manage.py spectacular --validate --fail-on-warn --file schema.yml` | Generate and check the API docs |
 | `python manage.py run_worker` | Background job worker (production) |
 | `python manage.py expire_holds`, `apply_retention` | One-off runs of those jobs |
@@ -478,5 +484,4 @@ Because CI has no `.env`, settings use their defaults there: `DEBUG` is off, so 
 - Online payment needs real Paystack/Flutterwave keys and an end-to-end test against the gateways' test mode.
 - Channex and the lock bridge need vendor certification before going live.
 - An independent penetration test is planned before go-live.
-- Guest self-service (look up / cancel) works per room: a group plan's rooms are looked up and cancelled one by one with their own confirmation numbers.
 - Frontend unit-test coverage is light; behaviour is mainly covered by the browser suite.

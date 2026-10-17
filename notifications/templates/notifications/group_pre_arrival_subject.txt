@@ -1,0 +1,1 @@
+{% autoescape off %}See you and your group tomorrow at {{ hotel_name }}{% endautoescape %}

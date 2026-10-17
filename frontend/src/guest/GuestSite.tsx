@@ -58,6 +58,8 @@ const party = (adults: number | string, children: number | string) =>
 
 interface Confirmation {
   refunded?: string;
+  group_reference?: string | null;
+  number_of_adults: number; number_of_children: number;
   confirmation_number: string; status: string; room_type_name: string; check_in_date: string; check_out_date: string;
   total_with_taxes: string; cancellation_policy: string; cancellation_fee_if_cancelled_now: string | null;
   rate_plan: { name: string; is_refundable: boolean };
@@ -72,11 +74,27 @@ export function useHotel() {
 export function GuestLayout({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   const hotel = useHotel();
   useEffect(() => { if (hotel.data) document.title = hotel.data.name; }, [hotel.data]);
+  // On the home page the header floats over the hero photo and turns solid once you scroll
+  const [scrolled, setScrolled] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 40);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+  const city = hotel.data?.address?.split(',').slice(-2).join(',').trim();
+
   return (
-    <div className="guest">
-      <header className="guest-header">
-        <Link to="/" className="guest-brand">{hotel.data?.name ?? 'Hotel'}</Link>
-        <nav className="guest-nav" aria-label="Site">
+    <div className={`guest${wide ? ' guest--home' : ''}`}>
+      <header className={`guest-header${wide && !scrolled && !menuOpen ? ' overlay' : ''}${menuOpen ? ' open' : ''}`}>
+        <Link to="/" className="guest-brand" onClick={() => setMenuOpen(false)}>
+          <span className="guest-monogram" aria-hidden="true">{(hotel.data?.name ?? 'H').charAt(0)}</span>
+          <span>{hotel.data?.name ?? 'Hotel'}{city && <small>{city}</small>}</span>
+        </Link>
+        <button type="button" className="guest-menu-toggle" aria-expanded={menuOpen} aria-controls="site-nav"
+                onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? 'Close' : 'Menu'}</button>
+        <nav className="guest-nav" aria-label="Site" id="site-nav" onClick={() => setMenuOpen(false)}>
           <a href="/#rooms">Rooms</a>
           <a href="/#offers">Offers</a>
           <a href="/#dining">Dining</a>
@@ -87,6 +105,11 @@ export function GuestLayout({ children, wide = false }: { children: ReactNode; w
         </nav>
       </header>
       <main className={wide ? 'guest-wide' : 'guest-main'}>{children}</main>
+      <section className="guest-closing" aria-label="Book your stay">
+        <span className="home-kicker">Your stay begins here</span>
+        <h2>Come and stay with us</h2>
+        <Link to="/book" className="button primary guest-cta">Check availability</Link>
+      </section>
       <footer className="guest-footer">
         <div className="guest-footer-grid">
           <div>
@@ -405,52 +428,155 @@ export function PaymentCompletePage() {
   );
 }
 
+interface GuestGroup {
+  reference: string;
+  bookings: Confirmation[];
+  totals: { rooms: number; total_with_taxes: string; cancellation_fee_if_cancelled_now: string | null; cancellable_rooms: number; refunded: string };
+}
+type Found = { kind: 'booking'; booking: Confirmation } | { kind: 'group'; group: GuestGroup };
+interface Access { reference: string; email: string }
+
+/** Group references (GR-…) open the whole group; confirmation numbers (BK-…) open one room. */
+const isGroupReference = (reference: string) => /^GR-/i.test(reference.trim());
+
+async function findBooking({ reference, email }: Access): Promise<Found> {
+  if (isGroupReference(reference)) return { kind: 'group', group: await post<GuestGroup>('bookings/group/lookup/', { reference, email }) };
+  return { kind: 'booking', booking: await post<Confirmation>('bookings/lookup/', { confirmation_number: reference, email }) };
+}
+
+async function cancelBooking({ reference, email }: Access, reason: string): Promise<Found> {
+  if (isGroupReference(reference)) return { kind: 'group', group: await post<GuestGroup>('bookings/group/cancel/', { reference, email, reason }) };
+  return { kind: 'booking', booking: await post<Confirmation>('bookings/cancel/', { confirmation_number: reference, email, reason }) };
+}
+
+const statusLabel = (status: string) => status.replace('_', ' ').toLowerCase();
+const statusBadge = (status: string) => `badge ${status === 'CANCELLED' ? 'danger' : 'info'}`;
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
 export function ManageBookingPage() {
-  const [form, setForm] = useState({ confirmation_number: '', email: '' });
+  const [form, setForm] = useState<Access>({ reference: '', email: '' });
   const [reason, setReason] = useState('');
-  const lookup = useMutation({ mutationFn: () => post<Confirmation>('bookings/lookup/', form) });
-  // Cancelling returns the updated booking, which then replaces the looked-up one
-  const cancel = useMutation({ mutationFn: () => post<Confirmation>('bookings/cancel/', { ...form, reason }) });
-  const booking = cancel.data ?? lookup.data;
+  const lookup = useMutation({ mutationFn: findBooking });
+  // Cancelling returns the updated booking (or group), which then replaces the looked-up one
+  const cancel = useMutation({ mutationFn: (access: Access) => cancelBooking(access, reason) });
+  const found = cancel.data ?? lookup.data;
+  const access = lookup.variables;
+
+  function open(next: Access) {
+    setForm(next);
+    cancel.reset();
+    lookup.mutate(next);
+  }
 
   return (
     <GuestLayout>
-      <div className="stack" style={{ maxWidth: 640, margin: '0 auto', width: '100%' }}>
+      <div className="stack" style={{ maxWidth: 680, margin: '0 auto', width: '100%' }}>
         <h1>Manage my booking</h1>
-        <form className="card form-grid" onSubmit={(e) => { e.preventDefault(); cancel.reset(); lookup.mutate(); }}>
-          <Field label="Confirmation number"><input required value={form.confirmation_number} placeholder="BK-XXXXXX"
-                                                    onChange={(e) => setForm({ ...form, confirmation_number: e.target.value })} /></Field>
+        <form className="card form-grid" onSubmit={(e) => { e.preventDefault(); open(form); }}>
+          <Field label="Confirmation number" hint="Or your group reference (GR-…) to manage every room">
+            <input required value={form.reference} placeholder="BK-XXXXXX"
+                   onChange={(e) => setForm({ ...form, reference: e.target.value })} />
+          </Field>
           <Field label="Email used to book"><input type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
           <button className="primary" style={{ alignSelf: 'end' }} disabled={lookup.isPending}>Find booking</button>
         </form>
         <ErrorAlert error={lookup.error || cancel.error} />
-        {booking && (
-          <div className="card stack">
-            <div className="row"><h2 style={{ margin: 0 }}>{booking.confirmation_number}</h2><span className="spacer" />
-              <span className={`badge ${booking.status === 'CANCELLED' ? 'danger' : 'info'}`}>{booking.status.replace('_', ' ').toLowerCase()}</span></div>
-            <dl className="details">
-              <dt>Guest</dt><dd>{booking.guest.first_name} {booking.guest.last_name}</dd>
-              <dt>Room</dt><dd>{booking.room_type_name} · {booking.rate_plan.name}</dd>
-              <dt>Stay</dt><dd>{formatDate(booking.check_in_date)} → {formatDate(booking.check_out_date)}</dd>
-              <dt>Total</dt><dd>{formatMoney(booking.total_with_taxes)}</dd>
-            </dl>
-            {booking.status === 'CANCELLED' && Number(booking.refunded ?? 0) > 0 && (
-              <div className="alert success">
-                {formatMoney(booking.refunded)} has been refunded to the card you paid with. It usually reaches you within a few working days.
-              </div>
-            )}
-            <p className="muted" style={{ margin: 0 }}>{booking.cancellation_policy}</p>
-            {booking.cancellation_fee_if_cancelled_now !== null && (
-              <div className="stack">
-                <strong>Cancel this booking</strong>
-                <span>Cancelling now costs <strong>{formatMoney(booking.cancellation_fee_if_cancelled_now)}</strong>; anything you paid above that is refunded.</span>
-                <Field label="Reason (optional)"><input value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
-                <div><button className="danger" disabled={cancel.isPending} onClick={() => cancel.mutate()}>Cancel booking</button></div>
-              </div>
-            )}
-          </div>
+
+        {found?.kind === 'booking' && access && (
+          <BookingCard booking={found.booking} reason={reason} onReason={setReason} busy={cancel.isPending}
+                       onCancel={() => cancel.mutate(access)}
+                       onOpenGroup={(reference) => open({ reference, email: access.email })} />
+        )}
+        {found?.kind === 'group' && access && (
+          <GroupCard group={found.group} reason={reason} onReason={setReason} busy={cancel.isPending}
+                     onCancel={() => cancel.mutate(access)} />
         )}
       </div>
     </GuestLayout>
+  );
+}
+
+interface CancelProps { reason: string; onReason: (reason: string) => void; busy: boolean; onCancel: () => void }
+
+function BookingCard({ booking, onOpenGroup, ...cancel }: CancelProps & { booking: Confirmation; onOpenGroup: (reference: string) => void }) {
+  return (
+    <div className="card stack">
+      <div className="row"><h2 style={{ margin: 0 }}>{booking.confirmation_number}</h2><span className="spacer" />
+        <span className={statusBadge(booking.status)}>{statusLabel(booking.status)}</span></div>
+      <dl className="details">
+        <dt>Guest</dt><dd>{booking.guest.first_name} {booking.guest.last_name}</dd>
+        <dt>Room</dt><dd>{booking.room_type_name} · {booking.rate_plan.name}</dd>
+        <dt>Stay</dt><dd>{formatDate(booking.check_in_date)} → {formatDate(booking.check_out_date)}</dd>
+        <dt>Total</dt><dd>{formatMoney(booking.total_with_taxes)}</dd>
+      </dl>
+      {booking.group_reference && (
+        <div className="alert success row">
+          <span>This room is part of group {booking.group_reference}.</span><span className="spacer" />
+          <button type="button" onClick={() => onOpenGroup(booking.group_reference!)}>Manage the whole group</button>
+        </div>
+      )}
+      <Refunded amount={booking.status === 'CANCELLED' ? booking.refunded : undefined} />
+      <p className="muted" style={{ margin: 0 }}>{booking.cancellation_policy}</p>
+      {booking.cancellation_fee_if_cancelled_now !== null && (
+        <CancelBlock title="Cancel this booking" button="Cancel booking" fee={booking.cancellation_fee_if_cancelled_now} {...cancel} />
+      )}
+    </div>
+  );
+}
+
+function GroupCard({ group, ...cancel }: CancelProps & { group: GuestGroup }) {
+  const first = group.bookings[0];
+  const { totals } = group;
+  const everyRoom = totals.cancellable_rooms === group.bookings.length;
+  return (
+    <div className="card stack">
+      <div className="row"><h2 style={{ margin: 0 }}>Group {group.reference}</h2><span className="spacer" />
+        <span className="badge info">{plural(totals.rooms, 'room')}</span></div>
+      {first && (
+        <dl className="details">
+          <dt>Booked by</dt><dd>{first.guest.first_name} {first.guest.last_name}</dd>
+          <dt>Stay</dt><dd>{formatDate(first.check_in_date)} → {formatDate(first.check_out_date)}</dd>
+          <dt>Total</dt><dd>{formatMoney(totals.total_with_taxes)}</dd>
+        </dl>
+      )}
+      <ul className="guest-group-rooms">
+        {group.bookings.map((b) => (
+          <li key={b.confirmation_number}>
+            <div>
+              <strong>{b.room_type_name}</strong>
+              <span className="muted"> · {plural(b.number_of_adults, 'adult')}
+                {b.number_of_children > 0 && `, ${plural(b.number_of_children, 'child', 'children')}`} · {b.confirmation_number}</span>
+            </div>
+            <span className={statusBadge(b.status)}>{statusLabel(b.status)}</span>
+          </li>
+        ))}
+      </ul>
+      <Refunded amount={totals.refunded} />
+      {first && <p className="muted" style={{ margin: 0 }}>{first.cancellation_policy}</p>}
+      {totals.cancellation_fee_if_cancelled_now !== null && (
+        <CancelBlock title={everyRoom ? 'Cancel the whole group' : `Cancel the ${plural(totals.cancellable_rooms, 'remaining room')}`}
+                     button="Cancel group" fee={totals.cancellation_fee_if_cancelled_now} {...cancel} />
+      )}
+    </div>
+  );
+}
+
+function Refunded({ amount }: { amount?: string }) {
+  if (!amount || Number(amount) <= 0) return null;
+  return (
+    <div className="alert success">
+      {formatMoney(amount)} has been refunded to the card you paid with. It usually reaches you within a few working days.
+    </div>
+  );
+}
+
+function CancelBlock({ title, button, fee, reason, onReason, busy, onCancel }: CancelProps & { title: string; button: string; fee: string }) {
+  return (
+    <div className="stack">
+      <strong>{title}</strong>
+      <span>Cancelling now costs <strong>{formatMoney(fee)}</strong>; anything you paid above that is refunded.</span>
+      <Field label="Reason (optional)"><input value={reason} onChange={(e) => onReason(e.target.value)} /></Field>
+      <div><button className="danger" disabled={busy} onClick={onCancel}>{button}</button></div>
+    </div>
   );
 }

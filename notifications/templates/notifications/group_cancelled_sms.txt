@@ -1,0 +1,1 @@
+{% autoescape off %}{{ hotel_name }}: group booking {{ group.reference }} ({{ rooms|length }} rooms) has been cancelled.{% endautoescape %}
