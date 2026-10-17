@@ -8,12 +8,14 @@ import secrets
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from audit.models import AuditLog
 from audit.services import record
 from billing import services as billing
-from billing.models import PaymentMethod
+from billing.models import Folio, PaymentMethod
+from billing.taxes import active_rules
 from hotel.errors import DomainError
 from hotel.money import money
 
@@ -127,13 +129,14 @@ def _record_on_folios(txn):
         return billing.record_payment(txn.folio, method=method, amount=txn.amount, reference=txn.reference, notes=notes)
 
     others = [b for b in bookings if b.pk != txn.booking_id]
-    shares = [(billing.folio_for(b), amount_due_online(b)) for b in others]
+    folios, rules = billing.folios_for(others), active_rules()
+    shares = [(folios[b.pk], amount_due_online(b, rules)) for b in others]
     lead_share = txn.amount - sum(amount for _, amount in shares)  # absorbs any rounding difference
     if lead_share <= 0:
         raise PaymentError("Group payment doesn't cover the rooms it was taken for.")
-    for folio, amount in shares:
-        billing.record_payment(folio, method=method, amount=amount, reference=txn.reference, notes=notes)
-    return billing.record_payment(txn.folio, method=method, amount=lead_share, reference=txn.reference, notes=notes)
+    payments = billing.record_payments(shares + [(txn.folio, lead_share)], method=method, reference=txn.reference,
+                                       notes=notes)
+    return payments[-1]
 
 
 def _confirm_booking_or_refund(txn):
@@ -144,8 +147,7 @@ def _confirm_booking_or_refund(txn):
     try:
         # A group is confirmed whole or not at all: half a group plan is no use to the guests
         with transaction.atomic():
-            for booking in bookings:
-                lifecycle.confirm_paid_booking(booking)
+            lifecycle.confirm_paid_bookings(bookings)
     except BookingError as e:
         # Paid after the hold lapsed and the room was sold: give the money back
         logger.warning("Refunding %s: booking could not be confirmed (%s)", txn.reference, e.message)
@@ -188,56 +190,90 @@ def refund_transaction(txn, *, amount, reason, request=None, folios=None):
 
 
 def _refund_on_folios(txn, amount, reason, request, folios=None):
-    """Take a gateway refund off the folios the payment went to (lead folio first), within each one's credit."""
-    folios = folios or [txn.folio] + [billing.folio_for(b) for b in _group_bookings(txn) if b.pk != txn.booking_id]
-    remaining = amount
-    for folio in folios:
-        credit = -folio.balance
-        take = min(credit, remaining) if len(folios) > 1 else remaining
-        if take <= 0:
-            continue
-        billing.refund(folio, amount=take, method=METHOD_FOR_GATEWAY[txn.gateway], reference=txn.reference,
-                       reason=reason, request=request)
-        remaining -= take
-        if remaining <= 0:
-            return
-    if remaining > 0:
-        raise PaymentError(f"Only {amount - remaining} of the refund is owed back to the guest.", field='amount')
+    """
+    Take a gateway refund off the folios the payment went to (lead folio
+    first), within each one's credit: credits read in one query, refunds
+    written together.
+    """
+    if folios is None:
+        others = [b for b in _group_bookings(txn) if b.pk != txn.booking_id]
+        folios = [txn.folio, *billing.folios_for(others).values()]
+    if len(folios) == 1:
+        entries = [(folios[0], amount)]  # billing.refund_many checks it against the folio's credit
+    else:
+        credits, entries, remaining = billing.folio_credits(folios), [], amount
+        for folio in folios:
+            take = min(credits[folio.pk], remaining)
+            if take > 0:
+                entries.append((folio, take))
+                remaining -= take
+            if remaining <= 0:
+                break
+        if remaining > 0:
+            raise PaymentError(f"Only {amount - remaining} of the refund is owed back to the guest.", field='amount')
+    billing.refund_many(entries, method=METHOD_FOR_GATEWAY[txn.gateway], reference=txn.reference, reason=reason,
+                        request=request)
 
 
 def refund_prepaid_remainder(booking, *, request=None):
-    """
-    After a booking is cancelled, send back to the guest's card whatever they
-    prepaid online beyond the cancellation fee. Only this booking's bill is
-    touched, so cancelling one room of a group plan never refunds the others.
-    Returns the amount refunded (0 if none). If the gateway refuses, the
-    credit stays on the folio for staff to refund, and the reason is audited.
-    """
-    folio = billing.folio_for(booking)
-    credit = -folio.balance
-    if credit <= 0:
-        return money(0)
-    payments = PaymentTransaction.objects.filter(
-        purpose=PaymentTransaction.Purpose.BOOKING_PREPAYMENT, status=Status.SUCCEEDED)
-    payments = payments.filter(booking__group_id=booking.group_id) if booking.group_id else payments.filter(booking=booking)
-    txn = payments.order_by('-settled_at').first()
-    if txn is None:
-        return money(0)  # paid at the desk: staff refund it the way it was paid
-    amount = min(credit, txn.amount - txn.refunded_amount)
-    if amount <= 0:
-        return money(0)
-    try:
-        refund_transaction(txn, amount=amount, request=request, folios=[folio],
-                           reason=f"Cancellation of {booking.confirmation_number}: prepaid amount beyond the fee")
-    except DomainError as e:
-        logger.warning("Automatic refund for %s failed: %s", booking.confirmation_number, e.message)
-        record(AuditLog.Action.PAYMENT_NEEDS_REVIEW, request=request, target=txn,
-               changes={'booking': booking.confirmation_number, 'refund_due': str(amount), 'reason': e.message})
-        return money(0)
-    record(AuditLog.Action.ONLINE_PAYMENT_REFUNDED, request=request, target=txn,
-           changes={'booking': booking.confirmation_number, 'amount': str(amount), 'automatic': True})
-    return amount
+    """Single-booking form of refund_prepaid_remainders. Returns the amount refunded (0 if none)."""
+    return refund_prepaid_remainders([booking], request=request)
 
 
-__all__ = ['GatewayError', 'PaymentError', 'confirm_payment', 'refund_prepaid_remainder', 'refund_transaction',
-           'start_payment']
+def refund_prepaid_remainders(bookings, *, request=None):
+    """
+    After bookings are cancelled, send back to the guest's card whatever they
+    prepaid online beyond the cancellation fees. Only these bookings' bills
+    are touched, so cancelling one room of a group plan never refunds the
+    others. The credits and payments are read in a fixed number of queries
+    and each online payment is refunded once, for all of its rooms together
+    (one gateway call per payment, not per room). Returns the total refunded.
+    If the gateway refuses, the credit stays on the folios for staff to
+    refund, and the reason is audited.
+    """
+    bookings = list(bookings)
+    if not bookings:
+        return money(0)
+    folios = {folio.booking_id: folio for folio in Folio.objects.filter(booking__in=bookings).with_totals()}
+    owed = {b.pk: -folios[b.pk].balance for b in bookings if b.pk in folios and folios[b.pk].balance < 0}
+    if not owed:
+        return money(0)
+    owed_bookings = [b for b in bookings if b.pk in owed]
+    groups = {b.group_id for b in owed_bookings if b.group_id}
+    candidates = PaymentTransaction.objects.filter(
+        Q(booking__in=[b for b in owed_bookings if not b.group_id]) | Q(booking__group_id__in=groups),
+        purpose=PaymentTransaction.Purpose.BOOKING_PREPAYMENT, status=Status.SUCCEEDED,
+    ).select_related('booking').order_by('-settled_at')
+    # The latest online prepayment covering each booking: its own, or its group's
+    payment_for = {}
+    for txn in candidates:
+        key = ('group', txn.booking.group_id) if txn.booking.group_id else ('booking', txn.booking_id)
+        payment_for.setdefault(key, txn)
+    by_payment = {}
+    for booking in owed_bookings:
+        txn = payment_for.get(('group', booking.group_id) if booking.group_id else ('booking', booking.pk))
+        if txn is not None:  # paid at the desk otherwise: staff refund it the way it was paid
+            by_payment.setdefault(txn.pk, (txn, []))[1].append(booking)
+
+    refunded = money(0)
+    for txn, covered in by_payment.values():  # one gateway refund per online payment
+        amount = min(sum((owed[b.pk] for b in covered), money(0)), txn.amount - txn.refunded_amount)
+        if amount <= 0:
+            continue
+        numbers = ', '.join(b.confirmation_number for b in covered)
+        try:
+            refund_transaction(txn, amount=amount, request=request, folios=[folios[b.pk] for b in covered],
+                               reason=f"Cancellation of {numbers}: prepaid amount beyond the fee")
+        except DomainError as e:
+            logger.warning("Automatic refund for %s failed: %s", numbers, e.message)
+            record(AuditLog.Action.PAYMENT_NEEDS_REVIEW, request=request, target=txn,
+                   changes={'booking': numbers, 'refund_due': str(amount), 'reason': e.message})
+            continue
+        record(AuditLog.Action.ONLINE_PAYMENT_REFUNDED, request=request, target=txn,
+               changes={'booking': numbers, 'amount': str(amount), 'automatic': True})
+        refunded += amount
+    return refunded
+
+
+__all__ = ['GatewayError', 'PaymentError', 'confirm_payment', 'refund_prepaid_remainder', 'refund_prepaid_remainders',
+           'refund_transaction', 'start_payment']

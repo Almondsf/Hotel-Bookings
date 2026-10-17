@@ -8,6 +8,8 @@ from audit.services import record
 from authentication.permissions import HasCapability
 from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializers as s
 
+from django.db.models import Count, Q
+
 from .models import Room, RoomType
 from .serializers import (
     RoomSearchQuerySerializer,
@@ -17,7 +19,9 @@ from .serializers import (
     RoomTypeSerializer,
     cancellation_terms,
 )
-from .services import generate_booking_plans, get_available_rooms_for_type, rank_for_party, suggest_group_plans
+from rates.engine import StayContext
+
+from .services import available_counts, generate_booking_plans, rank_for_party, stay_inventory, suggest_group_plans
 
 
 class RoomTypeCreateView(generics.CreateAPIView):
@@ -81,7 +85,8 @@ class RoomTypeListView(generics.ListAPIView):
     serializer_class = RoomTypeDetailSerializer
     permission_classes = [AllowAny]
     pagination_class = None
-    queryset = RoomType.objects.prefetch_related('amenities', 'images', 'rooms')
+    queryset = RoomType.objects.prefetch_related('amenities', 'images').annotate(
+        sellable_rooms=Count('rooms', filter=~Q(rooms__status__in=Room.UNSELLABLE_STATUSES)))
 
 
 class RoomListView(generics.ListAPIView):
@@ -112,25 +117,24 @@ class RoomTypeSearchView(APIView):
         adults = query.validated_data['adults']
         children = query.validated_data['children']
 
+        # Availability for every room type in one query, and one pricing context for the whole stay
+        free = available_counts(check_in, check_out)
+        stay = StayContext(check_in, check_out)
         candidates = RoomType.objects.filter(
-            max_adults__gte=adults,
-            max_children__gte=children
+            pk__in=free, max_adults__gte=adults, max_children__gte=children,
         ).prefetch_related('images')
-        room_types = rank_for_party(
-            [room_type for room_type in candidates
-             if get_available_rooms_for_type(room_type, check_in, check_out).exists()],
-            adults, children, check_in, check_out,
-        )
+        room_types = rank_for_party(list(candidates), adults, children, check_in, check_out)
 
         serializer = RoomTypeAvailabilitySerializer(
             room_types, many=True,
-            context={'request': request, 'check_in_date': check_in, 'check_out_date': check_out,
+            context={'request': request, 'check_in_date': check_in, 'check_out_date': check_out, 'stay': stay,
                      'promo_code': request.query_params.get('promo_code', '')[:40]},
         )
 
         booking_plans = group_plans = other_room_types = None
         if not room_types:
-            plans = generate_booking_plans(check_in, check_out, adults, children)
+            inventory = stay_inventory(check_in, check_out)  # shared by both plan formats
+            plans = generate_booking_plans(check_in, check_out, adults, children, inventory)
             booking_plans = {
                 'budget_friendly': self._format_plans(plans['budget_friendly']),
                 'convenience': self._format_plans(plans['convenience'])
@@ -138,9 +142,8 @@ class RoomTypeSearchView(APIView):
             # Too many people for one room: ready-made groups of rooms, plus every room on sale
             # so guests can still browse what the hotel has
             group_plans = [{**self._format_group_plan(plan), **cancellation_terms(None, check_in)}
-                           for plan in suggest_group_plans(check_in, check_out, adults, children)]
-            available = [rt for rt in RoomType.objects.prefetch_related('images')
-                         if get_available_rooms_for_type(rt, check_in, check_out).exists()]
+                           for plan in suggest_group_plans(check_in, check_out, adults, children, inventory=inventory)]
+            available = [room_type for room_type, _, _ in inventory]
             other_room_types = RoomTypeAvailabilitySerializer(
                 sorted(available, key=lambda rt: rt.base_price), many=True, context=serializer.context,
             ).data
@@ -193,7 +196,8 @@ class RoomTypeSearchView(APIView):
 
 
 class RoomTypeDetailView(generics.RetrieveAPIView):
-    queryset = RoomType.objects.prefetch_related('amenities', 'images', 'rooms')
+    queryset = RoomType.objects.prefetch_related('amenities', 'images').annotate(
+        sellable_rooms=Count('rooms', filter=~Q(rooms__status__in=Room.UNSELLABLE_STATUSES)))
     serializer_class = RoomTypeDetailSerializer
     permission_classes = [AllowAny]
     lookup_field = 'slug'

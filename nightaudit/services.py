@@ -17,7 +17,7 @@ from django.utils import timezone
 
 from audit.models import AuditLog
 from audit.services import record
-from billing.services import post_room_charges
+from billing.services import post_room_charges_for
 from booking import lifecycle
 from booking.models import Booking
 from hotel.clock import business_date
@@ -63,14 +63,14 @@ def run(*, request, auto_no_show=False):
             raise ConflictError("Some arrivals are still expected. Check them in, cancel them, or run the audit "
                                 "with no-shows marked automatically.")
 
-        no_shows = 0
-        for booking in Booking.objects.filter(check_in_date__lte=day, status=Booking.Status.CONFIRMED):
-            lifecycle.mark_no_show(booking, reason="Marked by night audit", request=request)
-            no_shows += 1
+        marked, _ = lifecycle.mark_no_shows(
+            Booking.objects.filter(check_in_date__lte=day, status=Booking.Status.CONFIRMED),
+            reason="Marked by night audit", request=request)
+        no_shows = len(marked)
 
-        posted = 0
-        for booking in Booking.objects.filter(status=Booking.Status.CHECKED_IN).select_related('room'):
-            posted += len(post_room_charges(booking, through_date=day, request=request))
+        # Every in-house night up to today, for all rooms at once
+        posted = len(post_room_charges_for(Booking.objects.filter(status=Booking.Status.CHECKED_IN),
+                                           through_date=day, request=request))
 
         expired = lifecycle.expire_holds()
 

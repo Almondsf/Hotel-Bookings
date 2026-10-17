@@ -32,8 +32,26 @@ class Guest(models.Model):
 
     @property
     def has_valid_identification(self):
-        today = timezone.localdate()
-        return self.identifications.filter(Q(expiry_date__isnull=True) | Q(expiry_date__gte=today)).exists()
+        if hasattr(self, 'valid_ids'):  # prefetched by valid_ids_prefetch(), so lists don't query per guest
+            return bool(self.valid_ids)
+        return valid_identifications().filter(guest=self).exists()
+
+
+def valid_identifications():
+    """ID documents that haven't expired."""
+    today = timezone.localdate()
+    return GuestIdentification.objects.filter(Q(expiry_date__isnull=True) | Q(expiry_date__gte=today))
+
+
+def valid_ids_prefetch(path='identifications'):
+    """Prefetch for Guest.has_valid_identification, e.g. valid_ids_prefetch('guest__identifications')."""
+    return models.Prefetch(path, queryset=valid_identifications().only('id', 'guest_id'), to_attr='valid_ids')
+
+
+def folio_totals_prefetch(path='folio'):
+    """Prefetch a booking's folio with its totals computed in the same query (for reading)."""
+    from billing.models import Folio
+    return models.Prefetch(path, queryset=Folio.objects.with_totals())
 
 
 class GuestIdentification(models.Model):
@@ -190,8 +208,17 @@ class Booking(models.Model):
         if self.check_in_date and self.check_out_date and self.check_in_date >= self.check_out_date:
             raise ValidationError("Check-out date must be after check-in date.")
 
+    def validate(self):
+        """
+        Field validators and clean(), without queries. Foreign keys,
+        uniqueness and the check constraints are enforced by the database;
+        checking them here (full_clean) cost several queries on every save.
+        """
+        self.clean_fields(exclude=[f.name for f in self._meta.fields if f.is_relation])
+        self.clean()
+
     def save(self, *args, **kwargs):
-        self.full_clean()
+        self.validate()
         super().save(*args, **kwargs)
 
     class Meta:

@@ -1,9 +1,49 @@
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from django.db.models import Q, Sum
+from django.db.models import Case, DecimalField, F, OuterRef, Q, Subquery, Sum, Value, When
+from django.db.models.functions import Coalesce
 
-from hotel.money import ZERO
+from hotel.money import ZERO, money
+
+
+MONEY = DecimalField(max_digits=14, decimal_places=2)
+
+
+def _subtotal(queryset, expression, group_by):
+    """A correlated subquery summing `expression` over `queryset` (0 when there are no rows)."""
+    total = queryset.values(group_by).annotate(total=Sum(expression)).values('total')
+    return Coalesce(Subquery(total, output_field=MONEY), Value(ZERO), output_field=MONEY)
+
+
+# Payments count for the guest, refunds against
+_SIGNED_PAYMENT = Case(When(kind='REFUND', then=-F('amount')), default=F('amount'), output_field=MONEY)
+
+
+class FolioQuerySet(models.QuerySet):
+    def with_totals(self):
+        """
+        Charges, payments and balance computed in the same query, so listing
+        folios doesn't run two aggregate queries per folio. Only for reading:
+        an annotated folio's totals don't follow later changes.
+        """
+        return self.annotate(
+            charges_sum=_subtotal(Charge.objects.filter(folio=OuterRef('pk'), is_void=False), 'total_amount', 'folio'),
+            payments_sum=_subtotal(FolioPayment.objects.filter(folio=OuterRef('pk'), is_void=False), _SIGNED_PAYMENT, 'folio'),
+            refunds_sum=_subtotal(FolioPayment.objects.filter(folio=OuterRef('pk'), is_void=False, kind='REFUND'),
+                                  'amount', 'folio'),
+        )
+
+
+class CorporateAccountQuerySet(models.QuerySet):
+    def with_balance(self):
+        """Each account's balance in the same query (see CorporateAccount.balance)."""
+        transferred = {'folio__account': OuterRef('pk'), 'folio__status': 'TRANSFERRED', 'is_void': False}
+        return self.annotate(balance_sum=(
+            _subtotal(Charge.objects.filter(**transferred), 'total_amount', 'folio__account')
+            - _subtotal(FolioPayment.objects.filter(**transferred), _SIGNED_PAYMENT, 'folio__account')
+            - _subtotal(AccountPayment.objects.filter(account=OuterRef('pk'), is_void=False), 'amount', 'account')
+        ))
 
 
 class ChargeCategory(models.TextChoices):
@@ -89,12 +129,19 @@ class CorporateAccount(models.Model):
     def __str__(self):
         return self.name
 
+    objects = CorporateAccountQuerySet.as_manager()
+
     @property
     def balance(self):
         """Amount the company owes: transferred folio balances minus its payments."""
-        transferred = sum((f.balance for f in self.folios.filter(status=Folio.Status.TRANSFERRED)), ZERO)
-        paid = self.payments.filter(is_void=False).aggregate(total=Sum('amount'))['total'] or ZERO
-        return transferred - paid
+        if hasattr(self, 'balance_sum'):  # from CorporateAccount.objects.with_balance()
+            return money(self.balance_sum)
+        transferred = Folio.objects.filter(account=self, status=Folio.Status.TRANSFERRED)
+        charges = Charge.objects.filter(folio__in=transferred, is_void=False).aggregate(t=Sum('total_amount'))['t'] or ZERO
+        paid = FolioPayment.objects.filter(folio__in=transferred, is_void=False).aggregate(
+            t=Sum(_SIGNED_PAYMENT))['t'] or ZERO
+        account_paid = self.payments.filter(is_void=False).aggregate(total=Sum('amount'))['total'] or ZERO
+        return money(charges - paid - account_paid)
 
 
 class Folio(models.Model):
@@ -134,15 +181,26 @@ class Folio(models.Model):
             return self.name
         return str(self.guest) if self.guest_id else ''
 
+    objects = FolioQuerySet.as_manager()
+
     @property
     def charges_total(self):
-        return self.charges.filter(is_void=False).aggregate(total=Sum('total_amount'))['total'] or ZERO
+        if hasattr(self, 'charges_sum'):  # from Folio.objects.with_totals()
+            return money(self.charges_sum)
+        return money(self.charges.filter(is_void=False).aggregate(total=Sum('total_amount'))['total'] or ZERO)
 
     @property
     def payments_total(self):
-        rows = self.payments.filter(is_void=False).values('kind').annotate(total=Sum('amount'))
-        totals = {row['kind']: row['total'] for row in rows}
-        return totals.get(FolioPayment.Kind.PAYMENT, ZERO) - totals.get(FolioPayment.Kind.REFUND, ZERO)
+        if hasattr(self, 'payments_sum'):
+            return money(self.payments_sum)
+        return money(self.payments.filter(is_void=False).aggregate(total=Sum(_SIGNED_PAYMENT))['total'] or ZERO)
+
+    @property
+    def refunds_total(self):
+        """Money given back to the guest from this folio."""
+        if hasattr(self, 'refunds_sum'):
+            return money(self.refunds_sum)
+        return money(self.payments.filter(is_void=False, kind='REFUND').aggregate(total=Sum('amount'))['total'] or ZERO)
 
     @property
     def balance(self):

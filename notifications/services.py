@@ -8,6 +8,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.db.models import Prefetch
 from django.tasks import task
 from django.template.loader import render_to_string
 from django.utils import timezone
@@ -43,8 +44,10 @@ GROUP_ROOMS = {
 
 
 def group_rooms(template, booking):
-    return list(booking.group.bookings.filter(status__in=GROUP_ROOMS[template])
-                .select_related('room__room_type').order_by('pk'))
+    statuses = GROUP_ROOMS[template]
+    if hasattr(booking.group, 'all_rooms'):  # prefetched by deliver_batch
+        return [room for room in booking.group.all_rooms if room.status in statuses]
+    return list(booking.group.bookings.filter(status__in=statuses).select_related('room__room_type').order_by('pk'))
 
 
 def _context(template, booking):
@@ -72,70 +75,110 @@ def _recipient(booking, channel):
 
 def notify(template, booking):
     """Queue `template` for the booking's guest on each configured channel (once per channel)."""
+    notify_many(template, [booking])
+
+
+def notify_many(template, bookings):
+    """
+    Queue `template` for each booking's guest on each configured channel, at
+    most once per booking and channel. After the surrounding transaction
+    commits: one query for what was already queued, one insert, one delivery
+    job for the batch. Bookings should come with their guest loaded.
+    """
     if template not in TEMPLATES:
         raise ValueError(f"Unknown notification template {template}")
-    if template in GROUP_ROOMS and booking.group_id is None:
+    bookings = list(bookings)
+    if template in GROUP_ROOMS and any(b.group_id is None for b in bookings):
         raise ValueError(f"{template} is for bookings in a group")
 
     def enqueue():
-        for channel in TEMPLATES[template]:
-            recipient = _recipient(booking, channel)
-            if not recipient:
-                continue
-            try:
-                with transaction.atomic():
-                    notification = Notification.objects.create(
-                        template=template, channel=channel, booking=booking, recipient=recipient)
-            except IntegrityError:
-                continue  # already sent / queued
-            deliver.enqueue(notification.pk)
+        wanted = [(booking, channel, recipient) for booking in bookings for channel in TEMPLATES[template]
+                  if (recipient := _recipient(booking, channel))]
+        if not wanted:
+            return
+        done = set(Notification.objects.filter(template=template, booking__in=bookings)
+                   .values_list('booking_id', 'channel'))  # already sent / queued
+        rows = [Notification(template=template, channel=channel, booking=booking, recipient=recipient)
+                for booking, channel, recipient in wanted if (booking.pk, channel) not in done]
+        if not rows:
+            return
+        try:
+            with transaction.atomic():
+                created = Notification.objects.bulk_create(rows)
+        except IntegrityError:
+            # Another worker queued some of these meanwhile; keep only what is still missing
+            Notification.objects.bulk_create(rows, ignore_conflicts=True)
+            created = list(Notification.objects.filter(template=template, booking__in=bookings,
+                                                       status=Notification.Status.QUEUED, sent_at__isnull=True))
+        deliver_batch.enqueue([n.pk for n in created])
     transaction.on_commit(enqueue)
 
 
 @task
 def deliver(notification_id):
-    notification = Notification.objects.select_related(
-        'booking__guest', 'booking__room__room_type', 'booking__group').get(pk=notification_id)
-    if notification.status == Notification.Status.SENT:
+    """Send one message (kept for jobs queued before batches existed)."""
+    return deliver_batch.call([notification_id])
+
+
+@task
+def deliver_batch(notification_ids):
+    """
+    Send queued messages. Each one is its own call to the email/SMS provider;
+    the database is read once and updated once for the whole batch. If any
+    fail they are marked FAILED and the job is retried; sent ones are skipped.
+    """
+    notifications = list(
+        Notification.objects.filter(pk__in=notification_ids).exclude(status=Notification.Status.SENT)
+        .select_related('booking__guest', 'booking__room__room_type', 'booking__group')
+        .prefetch_related(Prefetch('booking__group__bookings', to_attr='all_rooms',
+                                   queryset=Booking.objects.select_related('room__room_type').order_by('pk')))
+    )
+    if not notifications:
         return 'already sent'
+    failure = None
+    for notification in notifications:
+        try:
+            _send(notification)
+        except Exception as e:
+            notification.status = Notification.Status.FAILED
+            notification.error = str(e)[:500]
+            failure = failure or e
+        else:
+            notification.status = Notification.Status.SENT
+            notification.error = ''
+            notification.sent_at = timezone.now()
+    Notification.objects.bulk_update(notifications, ['status', 'error', 'sent_at', 'provider_message_id'])
+    if failure is not None:
+        raise failure  # let the worker retry with backoff
+    return 'sent'
+
+
+def _send(notification):
     booking = notification.booking
     context = _context(notification.template, booking)
-    try:
-        if notification.channel == Channel.EMAIL:
-            subject = render_to_string(f'notifications/{notification.template}_subject.txt', context).strip()
-            body = render_to_string(f'notifications/{notification.template}.txt', context)
-            notification.provider_message_id = channels.send_email(
-                notification.recipient, subject, body, attachments=_attachments(notification.template, booking))
-        else:
-            text = render_to_string(f'notifications/{notification.template}_sms.txt', context).strip()
-            send = channels.send_sms if notification.channel == Channel.SMS else channels.send_whatsapp
-            notification.provider_message_id = send(notification.recipient, text)
-    except Exception as e:
-        notification.status = Notification.Status.FAILED
-        notification.error = str(e)[:500]
-        notification.save(update_fields=['status', 'error'])
-        raise  # let the worker retry with backoff
-    notification.status = Notification.Status.SENT
-    notification.error = ''
-    notification.sent_at = timezone.now()
-    notification.save(update_fields=['status', 'error', 'sent_at', 'provider_message_id'])
-    return 'sent'
+    if notification.channel == Channel.EMAIL:
+        subject = render_to_string(f'notifications/{notification.template}_subject.txt', context).strip()
+        body = render_to_string(f'notifications/{notification.template}.txt', context)
+        notification.provider_message_id = channels.send_email(
+            notification.recipient, subject, body, attachments=_attachments(notification.template, booking))
+    else:
+        text = render_to_string(f'notifications/{notification.template}_sms.txt', context).strip()
+        send = channels.send_sms if notification.channel == Channel.SMS else channels.send_whatsapp
+        notification.provider_message_id = send(notification.recipient, text)
 
 
 def _attachments(template, booking):
     """The final invoice goes with the check-out thank-you (every room's, for a group)."""
     if template not in ('checked_out', 'group_checked_out'):
         return ()
-    from billing.models import Folio
+    from billing.models import Invoice
     from billing.pdf import render_invoice
 
     bookings = group_rooms(template, booking) if template == 'group_checked_out' else [booking]
-    attachments = []
-    for folio in Folio.objects.filter(booking__in=bookings).order_by('booking_id'):
-        invoice = folio.invoices.order_by('-issued_at').first()
-        if invoice:
-            attachments.append((f'{invoice.number}.pdf', render_invoice(invoice), 'application/pdf'))
-    return attachments
+    latest = {}  # each folio's latest invoice, all read in one query
+    for invoice in Invoice.objects.filter(folio__booking__in=bookings).order_by('folio__booking_id', '-issued_at', '-pk'):
+        latest.setdefault(invoice.folio_id, invoice)
+    return [(f'{invoice.number}.pdf', render_invoice(invoice), 'application/pdf') for invoice in latest.values()]
 
 
 @task
@@ -147,18 +190,18 @@ def send_pre_arrival_reminders():
     from hotel.clock import business_date
 
     tomorrow = business_date() + timedelta(days=1)
-    bookings = (Booking.objects.filter(status=Booking.Status.CONFIRMED, check_in_date=tomorrow)
-                .select_related('guest').order_by('pk'))
-    reminded_groups = set()
+    bookings = list(Booking.objects.filter(status=Booking.Status.CONFIRMED, check_in_date=tomorrow)
+                    .select_related('guest').order_by('pk'))
+    # Groups are checked group-wide: the first room may have changed since an earlier run (one cancelled)
+    reminded = set(Notification.objects.filter(template='group_pre_arrival', booking__group_id__in={
+        b.group_id for b in bookings if b.group_id}).values_list('booking__group_id', flat=True))
+    group_leads = {}
     for booking in bookings:
-        if booking.group_id is None:
-            notify('pre_arrival', booking)
-        elif booking.group_id not in reminded_groups:
-            reminded_groups.add(booking.group_id)
-            # Checked group-wide: the first room may have changed since an earlier run (one cancelled)
-            if not Notification.objects.filter(template='group_pre_arrival', booking__group_id=booking.group_id).exists():
-                notify('group_pre_arrival', booking)
-    return bookings.count()
+        if booking.group_id and booking.group_id not in reminded:
+            group_leads.setdefault(booking.group_id, booking)
+    notify_many('pre_arrival', [b for b in bookings if b.group_id is None])
+    notify_many('group_pre_arrival', group_leads.values())
+    return len(bookings)
 
 
 @task

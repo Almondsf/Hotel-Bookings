@@ -17,8 +17,8 @@ def revoke_all_sessions(user):
     Blacklist every refresh token issued to `user`, signing them out
     everywhere. Short-lived access tokens expire on their own.
     """
-    for token in OutstandingToken.objects.filter(user=user).exclude(blacklistedtoken__isnull=False):
-        BlacklistedToken.objects.get_or_create(token=token)
+    tokens = OutstandingToken.objects.filter(user=user).exclude(blacklistedtoken__isnull=False)
+    BlacklistedToken.objects.bulk_create((BlacklistedToken(token=token) for token in tokens), ignore_conflicts=True)
 
 
 def build_set_password_link(user):

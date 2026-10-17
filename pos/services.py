@@ -12,7 +12,7 @@ from django.utils import timezone
 from audit.models import AuditLog
 from audit.services import record
 from billing import services as billing
-from billing.taxes import compute_taxes
+from billing.taxes import active_rules, compute_taxes
 from booking.models import Booking
 from hotel.errors import ConflictError, DomainError, ForbiddenError
 from hotel.money import ZERO, money
@@ -34,12 +34,13 @@ def _lock_open(order):
     return order
 
 
-def totals(order):
-    """Net, tax and total of an order as it would be billed."""
+def totals(order, rules=None):
+    """Net, tax and total of an order as it would be billed. `rules`: tax rules already loaded."""
+    rules = active_rules() if rules is None else rules
     net = tax = ZERO
     for item in order.items.all():
         line_net = money(item.unit_price * item.quantity)
-        line_tax, _ = compute_taxes(item.charge_category, line_net)
+        line_tax, _ = compute_taxes(item.charge_category, line_net, rules)
         net += line_net
         tax += line_tax
     return {'net': net, 'tax': tax, 'total': net + tax}
@@ -72,22 +73,25 @@ def remove_item(order, item, *, user):
 
 
 def _consume_stock(order):
-    for item in order.items.all():
-        product = Product.objects.select_for_update().get(pk=item.product_id)
+    """Take the order's items out of stock: products locked and updated together."""
+    items = list(order.items.all())
+    products = {p.pk: p for p in Product.objects.select_for_update()
+                .filter(pk__in=sorted({i.product_id for i in items})).order_by('pk')}
+    for item in items:
+        product = products[item.product_id]
         if product.track_stock:
             if product.stock_quantity < item.quantity:
                 raise ConflictError(f"Only {product.stock_quantity} × {product.name} left in stock.")
             product.stock_quantity -= item.quantity
-            product.save(update_fields=['stock_quantity'])
+    Product.objects.bulk_update([p for p in products.values() if p.track_stock], ['stock_quantity'])
 
 
 def _post_items(order, folio, request):
-    for item in order.items.all():
-        billing.post_charge(
-            folio, category=item.charge_category,
-            description=f"{order.outlet.name}: {item.name}" + (f" ({item.notes})" if item.notes else ''),
-            unit_price=item.unit_price, quantity=item.quantity, source=f'pos.order:{order.pk}', request=request,
-        )
+    billing.post_charges([{
+        'folio': folio, 'category': item.charge_category,
+        'description': f"{order.outlet.name}: {item.name}" + (f" ({item.notes})" if item.notes else ''),
+        'unit_price': item.unit_price, 'quantity': item.quantity, 'source': f'pos.order:{order.pk}',
+    } for item in order.items.all()], request=request)
 
 
 def _finish(order, folio, request, booking=None):

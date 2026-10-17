@@ -4,9 +4,13 @@ from booking.exceptions import BookingError
 from hotel.clock import business_date
 
 
-def validate_stay(room_type, check_in_date, check_out_date, adults, children, *, allow_past_check_in=False):
-    """Business rules every booking must satisfy, wherever it's created or modified from."""
-    if not allow_past_check_in and check_in_date < business_date():
+def validate_stay(room_type, check_in_date, check_out_date, adults, children, *, allow_past_check_in=False,
+                   today=None):
+    """
+    Business rules every booking must satisfy, wherever it's created or modified
+    from. Pass `today` (the business date) when validating many rooms at once.
+    """
+    if not allow_past_check_in and check_in_date < (today or business_date()):
         raise BookingError("Check-in date cannot be in the past.", field='check_in_date')
     if check_in_date >= check_out_date:
         raise BookingError("Check-out date must be after check-in date.", field='check_out_date')

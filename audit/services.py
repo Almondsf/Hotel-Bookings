@@ -19,10 +19,26 @@ def client_ip(request):
 
 def record(action, *, request=None, actor=None, actor_email='', target=None, changes=None):
     """Write an audit entry. `actor` defaults to the authenticated request user."""
+    entry = _entry(action, request=request, actor=actor, actor_email=actor_email, target=target, changes=changes)
+    entry.save()
+    return entry
+
+
+def record_many(action, targets, *, request=None, actor=None, actor_email='', changes=None):
+    """
+    One audit entry per target, written in a single query. `changes` is a
+    dict shared by every entry, or a function of the target.
+    """
+    entries = [_entry(action, request=request, actor=actor, actor_email=actor_email, target=target,
+                      changes=changes(target) if callable(changes) else changes) for target in targets]
+    return AuditLog.objects.bulk_create(entries)
+
+
+def _entry(action, *, request, actor, actor_email, target, changes):
     if actor is None and request is not None and request.user.is_authenticated:
         actor = request.user
 
-    return AuditLog.objects.create(
+    return AuditLog(
         actor=actor,
         actor_email=(actor.email if actor else actor_email)[:255],
         action=action,

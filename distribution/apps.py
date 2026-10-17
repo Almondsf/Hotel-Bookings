@@ -15,5 +15,11 @@ class DistributionConfig(AppConfig):
             from .services import schedule_push
             schedule_push(instance)
 
+        def bookings_saved(sender, bookings, **kwargs):
+            from .services import schedule_push
+            schedule_push(*bookings)
+
         # Any booking change can move availability; republish just those dates
         post_save.connect(booking_changed, sender=Booking, dispatch_uid='distribution.booking_changed')
+        from booking.signals import bookings_saved as bulk_saved
+        bulk_saved.connect(bookings_saved, dispatch_uid='distribution.bookings_saved')

@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from django.db.models import Count, Q, Sum
 
-from billing.models import Charge, ChargeCategory, CorporateAccount, Folio, FolioPayment
+from billing.models import AccountPayment, Charge, ChargeCategory, CorporateAccount, Folio, FolioPayment
 from booking.models import Booking, BookingNight
 from hotel.clock import business_date
 from hotel.money import ZERO, money
@@ -24,48 +24,54 @@ def _ratio(numerator, denominator):
     return money(Decimal(numerator) / Decimal(denominator)) if denominator else ZERO
 
 
-def rooms_available(day):
-    """Rooms that could be sold on `day`: all rooms minus those out of order."""
-    blocked = set(RoomAvailabilityOverride.objects.filter(start_date__lte=day, end_date__gt=day)
-                  .values_list('room_id', flat=True))
-    if day >= business_date():
-        blocked |= set(Room.objects.filter(status=Room.Status.OUT_OF_SERVICE).values_list('pk', flat=True))
-    return Room.objects.count() - len(blocked)
+def occupancy(start, end):
+    """
+    One row per day in [start, end]. A fixed handful of queries for the whole
+    range (not per day): rooms, out-of-order blocks, posted room charges for
+    closed days, and nights on the books for today onwards.
+    """
+    today = business_date()
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    total_rooms = Room.objects.count()
+    blocks = list(RoomAvailabilityOverride.objects.filter(start_date__lte=end, end_date__gt=start)
+                  .values_list('room_id', 'start_date', 'end_date'))
+    out_of_service = set(Room.objects.filter(status=Room.Status.OUT_OF_SERVICE).values_list('pk', flat=True))         if end >= today else set()
 
+    sold = {}  # day -> (rooms sold, room revenue)
+    if start < today:
+        posted = (Charge.objects.filter(category=ChargeCategory.ROOM, service_date__range=(start, min(end, today - timedelta(days=1))),
+                                        is_void=False)
+                  .values('service_date').annotate(count=Count('id'), revenue=Sum('net_amount')))
+        sold.update({row['service_date']: (row['count'], row['revenue'] or ZERO) for row in posted})
+    if end >= today:
+        first = max(start, today)
+        on_books = (BookingNight.objects
+                    .filter(date__range=(first, end), booking__in=Booking.objects.blocking().overlapping(first, end + timedelta(days=1)))
+                    .values('date').annotate(count=Count('id'), revenue=Sum('rate')))
+        sold.update({row['date']: (row['count'], row['revenue'] or ZERO) for row in on_books})
 
-def _room_nights(day):
-    """(rooms sold, room revenue) for the night of `day`."""
-    if day < business_date():
-        posted = Charge.objects.filter(category=ChargeCategory.ROOM, service_date=day, is_void=False)
-        totals = posted.aggregate(count=Count('id'), revenue=Sum('net_amount'))
-        return totals['count'], totals['revenue'] or ZERO
-    on_books = BookingNight.objects.filter(
-        date=day,
-        booking__in=Booking.objects.blocking().overlapping(day, day + timedelta(days=1)),
-    )
-    totals = on_books.aggregate(count=Count('id'), revenue=Sum('rate'))
-    return totals['count'], totals['revenue'] or ZERO
+    rows = []
+    for day in days:
+        blocked = {room for room, block_start, block_end in blocks if block_start <= day < block_end}
+        if day >= today:
+            blocked |= out_of_service
+        available = total_rooms - len(blocked)
+        count, revenue = sold.get(day, (0, ZERO))
+        rows.append({
+            'date': day,
+            'actual': day < today,
+            'rooms_available': available,
+            'rooms_sold': count,
+            'occupancy_percent': float(_ratio(count * 100, available)),
+            'room_revenue': revenue,
+            'adr': _ratio(revenue, count),
+            'revpar': _ratio(revenue, available),
+        })
+    return rows
 
 
 def occupancy_day(day):
-    available = rooms_available(day)
-    sold, revenue = _room_nights(day)
-    return {
-        'date': day,
-        'actual': day < business_date(),
-        'rooms_available': available,
-        'rooms_sold': sold,
-        'occupancy_percent': float(_ratio(sold * 100, available)),
-        'room_revenue': revenue,
-        'adr': _ratio(revenue, sold),
-        'revpar': _ratio(revenue, available),
-    }
-
-
-def occupancy(start, end):
-    """One row per day in [start, end]."""
-    days = (end - start).days + 1
-    return [occupancy_day(start + timedelta(days=i)) for i in range(days)]
+    return occupancy(day, day)[0]
 
 
 def revenue(start, end):
@@ -121,7 +127,7 @@ def payments(start, end):
 
 def guest_ledger():
     """Open folios and what is owed on each (in-house guests and non-guest accounts)."""
-    folios = Folio.objects.filter(status=Folio.Status.OPEN).select_related('booking__room', 'guest')
+    folios = Folio.objects.filter(status=Folio.Status.OPEN).select_related('booking__room', 'guest').with_totals()
     rows = []
     for folio in folios:
         booking = folio.booking
@@ -138,14 +144,20 @@ def city_ledger(today=None):
     """What companies owe, aged by how long ago each folio was billed to them."""
     today = today or business_date()
     buckets = [('current', 0, 30), ('31_60', 31, 60), ('61_90', 61, 90), ('over_90', 91, None)]
+    # Three queries in all: accounts, their transferred folios (with totals) and their payments
+    transferred = defaultdict(list)
+    for folio in Folio.objects.filter(status=Folio.Status.TRANSFERRED, account__isnull=False).with_totals():
+        transferred[folio.account_id].append(folio)
+    paid_by_account = dict(AccountPayment.objects.filter(is_void=False).values('account')
+                           .annotate(total=Sum('amount')).values_list('account', 'total'))
     accounts = []
-    for account in CorporateAccount.objects.prefetch_related('folios', 'payments'):
+    for account in CorporateAccount.objects.all():
         aged = {name: ZERO for name, _, _ in buckets}
-        for folio in account.folios.filter(status=Folio.Status.TRANSFERRED):
+        for folio in transferred[account.pk]:
             age = (today - folio.transferred_at.date()).days
             name = next(n for n, low, high in buckets if age >= low and (high is None or age <= high))
             aged[name] += folio.balance
-        paid = account.payments.filter(is_void=False).aggregate(total=Sum('amount'))['total'] or ZERO
+        paid = paid_by_account.get(account.pk) or ZERO
         # Payments settle the oldest debt first
         for name in reversed([b[0] for b in buckets]):
             applied = min(aged[name], paid)

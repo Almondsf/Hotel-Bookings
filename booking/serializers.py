@@ -9,10 +9,11 @@ from payments.gateways import GatewayField
 from rates.engine import WEBSITE, RatePlanUnavailable, require_plan
 from rates.models import RatePlan
 from rooms.models import RoomType
-from rooms.services import get_available_rooms_for_type
+from hotel.clock import business_date
+from rooms.services import available_counts, get_available_rooms_for_type
 
 from .exceptions import BookingError
-from .models import Booking, BookingGroup, Guest
+from .models import Booking, BookingGroup, Guest, folio_totals_prefetch
 from .policies import cancellation_penalty, describe_cancellation_policy, free_cancellation_deadline
 from .validation import validate_stay
 
@@ -82,10 +83,59 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         return data
 
 
-class GroupRoomSerializer(serializers.Serializer):
-    room_type = serializers.PrimaryKeyRelatedField(queryset=RoomType.objects.all())
+def resolve_room_requests(items):
+    """
+    Turn requested rooms' `room_type` (and optional `room`) ids into objects
+    with one query each for all the items, instead of one per item as
+    PrimaryKeyRelatedField would. Returns per-item errors (empty dicts when fine).
+    """
+    from rooms.models import Room
+
+    room_types = RoomType.objects.in_bulk({item['room_type'] for item in items})
+    rooms = Room.objects.in_bulk({item['room'] for item in items if item.get('room')})
+    errors = []
+    for item in items:
+        error = {}
+        if item['room_type'] not in room_types:
+            error['room_type'] = [f'Invalid pk "{item["room_type"]}" - object does not exist.']
+        if item.get('room') and item['room'] not in rooms:
+            error['room'] = [f'Invalid pk "{item["room"]}" - object does not exist.']
+        errors.append(error)
+        if not error:
+            item['room_type'] = room_types[item['room_type']]
+            if item.get('room'):
+                item['room'] = rooms[item['room']]
+    return errors
+
+
+class RoomRequestListSerializer(serializers.ListSerializer):
+    """A list of requested rooms, resolved in a fixed number of queries (see resolve_room_requests)."""
+    def to_internal_value(self, data):
+        items = super().to_internal_value(data)
+        errors = resolve_room_requests(items)
+        if any(errors):
+            raise serializers.ValidationError(errors)
+        return items
+
+
+class RoomRequestSerializer(serializers.Serializer):
+    """Base for a requested room; resolves its own ids when used on its own rather than in a list."""
+    def to_internal_value(self, data):
+        item = super().to_internal_value(data)
+        if not isinstance(self.parent, serializers.ListSerializer):
+            errors = resolve_room_requests([item])
+            if errors[0]:
+                raise serializers.ValidationError(errors[0])
+        return item
+
+
+class GroupRoomSerializer(RoomRequestSerializer):
+    room_type = serializers.IntegerField(help_text="Room type id")
     number_of_adults = serializers.IntegerField(min_value=1)
     number_of_children = serializers.IntegerField(min_value=0, default=0)
+
+    class Meta:
+        list_serializer_class = RoomRequestListSerializer
 
 
 class GroupBookingCreateSerializer(serializers.Serializer):
@@ -106,17 +156,19 @@ class GroupBookingCreateSerializer(serializers.Serializer):
         return rooms
 
     def validate(self, data):
+        today = business_date()
         for room in data['rooms']:
             run_domain_validation(
                 validate_stay, room['room_type'], data['check_in_date'], data['check_out_date'],
-                room['number_of_adults'], room['number_of_children'],
+                room['number_of_adults'], room['number_of_children'], today=today,
             )
         # Enough rooms of each type for the whole group (re-checked under a lock on creation)
         needed = {}
         for room in data['rooms']:
             needed[room['room_type']] = needed.get(room['room_type'], 0) + 1
+        free = available_counts(data['check_in_date'], data['check_out_date'])
         for room_type, count in needed.items():
-            if get_available_rooms_for_type(room_type, data['check_in_date'], data['check_out_date']).count() < count:
+            if free.get(room_type.pk, 0) < count:
                 raise serializers.ValidationError(f"Not enough {room_type.name} rooms left for those dates.")
         return data
 
@@ -127,8 +179,8 @@ class TaxQuoteMixin(serializers.Serializer):
 
     def _quote(self, obj):
         from billing.models import ChargeCategory
-        from billing.taxes import quote
-        return quote(ChargeCategory.ROOM, obj.total_price)
+        from billing.taxes import quote, rules_for
+        return quote(ChargeCategory.ROOM, obj.total_price, rules_for(self))
 
     def get_taxes(self, obj) -> str:
         return str(self._quote(obj)['taxes'])
@@ -188,12 +240,8 @@ class BookingConfirmationSerializer(RatePlanInfoMixin, TaxQuoteMixin, Cancellati
         ]
 
     def get_refunded(self, obj) -> str:
-        from billing.models import FolioPayment
         folio = getattr(obj, 'folio', None)
-        if folio is None:
-            return '0.00'
-        total = sum((p.amount for p in folio.payments.filter(kind=FolioPayment.Kind.REFUND, is_void=False)), 0)
-        return f"{total:.2f}"
+        return f"{folio.refunds_total:.2f}" if folio is not None else '0.00'
 
 class GuestBookingAccessSerializer(serializers.Serializer):
     """Guests prove access to a booking with its confirmation number and email."""
@@ -248,8 +296,8 @@ class GuestGroupSerializer(serializers.ModelSerializer):
 
     def _rooms(self, obj):
         if not hasattr(obj, '_rooms'):
-            obj._rooms = list(obj.bookings.select_related('guest', 'room__room_type', 'group', 'rate_plan', 'folio')
-                              .prefetch_related('payment_transactions').order_by('pk'))
+            obj._rooms = list(obj.bookings.select_related('guest', 'room__room_type', 'group', 'rate_plan')
+                              .prefetch_related('payment_transactions', folio_totals_prefetch()).order_by('pk'))
         return obj._rooms
 
     @extend_schema_field(BookingConfirmationSerializer(many=True))
