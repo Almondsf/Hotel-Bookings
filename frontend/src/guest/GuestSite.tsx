@@ -4,6 +4,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { api, ApiError, post } from '../api/client';
 import { ErrorAlert, Field, fieldError, Loading } from '../components/ui';
+import { setMonogramFavicon } from '../lib/favicon';
 import { addDays, formatDate, formatDateTime, formatMoney, todayISO } from '../lib/format';
 import './guest.css';
 import './home.css';
@@ -73,7 +74,11 @@ export function useHotel() {
 /** `wide` lets a page (the home page) run edge to edge instead of in the centred booking column. */
 export function GuestLayout({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   const hotel = useHotel();
-  useEffect(() => { if (hotel.data) document.title = hotel.data.name; }, [hotel.data]);
+  useEffect(() => {
+    if (!hotel.data) return;
+    document.title = hotel.data.name;
+    setMonogramFavicon(hotel.data.name);
+  }, [hotel.data]);
   // On the home page the header floats over the hero photo and turns solid once you scroll
   const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
