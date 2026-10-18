@@ -11,22 +11,24 @@ from django.db import transaction
 from django.utils import timezone
 
 from audit.models import AuditLog
-from audit.services import record
+from audit.services import record, record_many
 from billing import services as billing
 from billing.exceptions import BillingError
 from billing.models import ChargeCategory
 from booking.allocation import allocate_room, lock_room_types
 from booking.exceptions import BookingError, InvalidTransitionError, RoomUnavailableError
-from booking.models import Booking, GuestIdentification
+from booking.models import Booking, GuestIdentification, valid_identifications
+from booking.signals import bookings_saved
 from booking.policies import cancellation_penalty, penalty_for
 from booking.pricing import reprice
 from booking.validation import validate_stay
 from hotel.clock import business_date
-from housekeeping.services import mark_dirty
-from locks.services import revoke_keys
+from hotel.money import money
+from housekeeping.services import mark_dirty, set_rooms_status
+from locks.services import revoke_keys, revoke_keys_for
 from notifications.services import notify
 from rooms.models import Room
-from rooms.services import get_available_rooms_for_type
+from rooms.services import free_rooms, get_available_rooms_for_type
 
 Status = Booking.Status
 HOLD_EXPIRED_REASON = "Payment hold expired"
@@ -37,12 +39,36 @@ def _lock(booking):
     return Booking.objects.select_for_update().get(pk=booking.pk)
 
 
+def _lock_many(bookings):
+    """Re-read several bookings under row locks in one query (id order, so requests can't deadlock)."""
+    ids = sorted({booking.pk for booking in bookings})
+    return list(Booking.objects.select_for_update(of=('self',)).select_related('guest', 'rate_plan', 'group')
+                .filter(pk__in=ids).order_by('pk'))
+
+
 def _ensure_can_become(booking, new_status):
     if new_status not in Booking.TRANSITIONS[booking.status]:
         raise InvalidTransitionError(
             f"A {booking.get_status_display().lower()} booking cannot be changed to "
             f"{Status(new_status).label.lower()}."
         )
+
+
+def _only(done, skipped):
+    """The single booking a one-item batch acted on, or the error that stopped it."""
+    if skipped:
+        raise skipped[0][1]
+    return done[0]
+
+
+def _saved(bookings, fields):
+    """Write `fields` of the bookings in one query and tell listeners (bulk_update sends no post_save)."""
+    if bookings:
+        now = timezone.now()
+        for booking in bookings:
+            booking.updated_at = now
+        Booking.objects.bulk_update(bookings, [*fields, 'updated_at'])
+        bookings_saved.send(sender=Booking, bookings=bookings)
 
 
 def confirm(booking):
@@ -67,40 +93,64 @@ def record_identification(guest, document, *, request=None):
 
 
 def confirm_paid_booking(booking):
-    """
-    Confirm an online booking whose payment has just succeeded. If the
-    payment arrived after the hold lapsed, the room may have been resold, so
-    a free room of the same type is found again; raises RoomUnavailableError
-    when there is none (the caller refunds).
-    """
-    with transaction.atomic():
-        booking = _lock(booking)
-        if booking.status == Status.CONFIRMED:
-            return booking
-        hold_lapsed = (
-            booking.status == Status.CANCELLED and booking.cancellation_reason == HOLD_EXPIRED_REASON
-        ) or (booking.status == Status.PENDING and booking.hold_expires_at and booking.hold_expires_at <= timezone.now())
-        if booking.status != Status.PENDING and not hold_lapsed:
-            raise InvalidTransitionError(f"A {booking.get_status_display().lower()} booking can't be confirmed.")
+    return confirm_paid_bookings([booking])[0]
 
-        if hold_lapsed:
-            room_type = Room.objects.get(pk=booking.room_id).room_type
-            lock_room_types([room_type])
-            free = get_available_rooms_for_type(room_type, booking.check_in_date, booking.check_out_date,
-                                                exclude_booking=booking)
-            room = free.filter(pk=booking.room_id).first() or free.first()
+
+def confirm_paid_bookings(bookings):
+    """
+    Confirm online bookings whose (shared) payment has just succeeded, all or
+    none, in a fixed number of queries. If the payment arrived after a hold
+    lapsed, that room may have been resold, so a free room of the same type is
+    found again; raises RoomUnavailableError when there is none (the caller
+    refunds). Bookings already confirmed are left as they are.
+    """
+    now = timezone.now()
+    with transaction.atomic():
+        locked = _lock_many(bookings)
+        todo, lapsed = [], set()
+        for booking in locked:
+            if booking.status == Status.CONFIRMED:
+                continue
+            hold_lapsed = (
+                booking.status == Status.CANCELLED and booking.cancellation_reason == HOLD_EXPIRED_REASON
+            ) or (booking.status == Status.PENDING and booking.hold_expires_at and booking.hold_expires_at <= now)
+            if booking.status != Status.PENDING and not hold_lapsed:
+                raise InvalidTransitionError(f"A {booking.get_status_display().lower()} booking can't be confirmed.")
+            todo.append(booking)
+            if hold_lapsed:
+                lapsed.add(booking.pk)
+        if lapsed:
+            _reallocate([b for b in todo if b.pk in lapsed])
+        for booking in todo:
+            booking.status = Status.CONFIRMED
+            booking.confirmed_at = now
+            booking.hold_expires_at = None
+        _saved(todo, ['status', 'confirmed_at', 'hold_expires_at', 'room', 'cancelled_at', 'cancellation_reason'])
+    record_many(AuditLog.Action.BOOKING_CONFIRMED, todo, changes=lambda b: {'after_lapsed_hold': b.pk in lapsed})
+    return locked
+
+
+def _reallocate(bookings):
+    """Give bookings whose hold lapsed a free room again: their own if still free, else another of the type."""
+    rooms = Room.objects.select_related('room_type').in_bulk([b.room_id for b in bookings])
+    lock_room_types(room.room_type for room in rooms.values())
+    taken = set()
+    by_stay = {}
+    for booking in bookings:
+        by_stay.setdefault((booking.check_in_date, booking.check_out_date), []).append(booking)
+    for (check_in_date, check_out_date), stay in by_stay.items():  # one query per distinct stay (one for a group)
+        free = list(free_rooms(check_in_date, check_out_date, exclude_bookings=stay)
+                    .filter(room_type__in={rooms[b.room_id].room_type_id for b in stay}))
+        for booking in stay:
+            room_type_id = rooms[booking.room_id].room_type_id
+            room = next((r for r in free if r.pk == booking.room_id and r.pk not in taken), None) or \
+                next((r for r in free if r.room_type_id == room_type_id and r.pk not in taken), None)
             if room is None:
                 raise RoomUnavailableError("The room was released before payment completed and is no longer available.")
+            taken.add(room.pk)
             booking.room = room
             booking.cancelled_at = None
             booking.cancellation_reason = ''
-
-        booking.status = Status.CONFIRMED
-        booking.confirmed_at = timezone.now()
-        booking.hold_expires_at = None
-        booking.save()
-    record(AuditLog.Action.BOOKING_CONFIRMED, target=booking, changes={'after_lapsed_hold': bool(hold_lapsed)})
-    return booking
 
 
 def check_in(booking, *, identification=None, request=None):
@@ -109,50 +159,74 @@ def check_in(booking, *, identification=None, request=None):
     in the same step; with REQUIRE_GUEST_ID_AT_CHECK_IN a valid one must be
     on file.
     """
-    with transaction.atomic():
-        booking = _lock(booking)
-        _ensure_can_become(booking, Status.CHECKED_IN)
-
+    with transaction.atomic():  # a failed check-in doesn't keep the ID document either
         if identification:
-            record_identification(booking.guest, identification, request=request)
-        if settings.REQUIRE_GUEST_ID_AT_CHECK_IN and not booking.guest.has_valid_identification:
-            raise BookingError("A valid ID document must be recorded before check-in.", field='identification')
-
-        today = business_date()
-        if today < booking.check_in_date:
-            raise BookingError(f"This booking arrives on {booking.check_in_date}; it can't be checked in yet.")
-        if today >= booking.check_out_date:
-            raise BookingError("This booking's stay has already ended.")
-
-        room = Room.objects.select_for_update().get(pk=booking.room_id)
-        if room.status in Room.UNSELLABLE_STATUSES:
-            raise RoomUnavailableError(
-                f"Room {room.room_number} is {room.get_status_display().lower()}. Move the booking to another room first."
-            )
-        ready = ([Room.Housekeeping.INSPECTED] if settings.REQUIRE_ROOM_INSPECTION
-                 else [Room.Housekeeping.CLEAN, Room.Housekeeping.INSPECTED])
-        if settings.REQUIRE_CLEAN_ROOM_AT_CHECK_IN and room.housekeeping_status not in ready:
-            raise RoomUnavailableError(
-                f"Room {room.room_number} is {room.get_housekeeping_status_display().lower()}; "
-                "housekeeping must finish it first (or move the guest to a ready room)."
-            )
-        if Booking.objects.filter(room=room, status=Status.CHECKED_IN).exclude(pk=booking.pk).exists():
-            raise RoomUnavailableError(f"Room {room.room_number} is still occupied by an in-house guest.")
-
-        booking.status = Status.CHECKED_IN
-        booking.checked_in_at = timezone.now()
-        booking.save(update_fields=['status', 'checked_in_at', 'updated_at'])
-        billing.folio_for(booking)  # open the bill so extras can be posted from the first hour
-        room.status = Room.Status.OCCUPIED
-        room.save(update_fields=['status', 'updated_at'])
-
-    record(AuditLog.Action.BOOKING_CHECKED_IN, request=request, target=booking, changes={'room': room.room_number})
-    return booking
+            record_identification(_lock(booking).guest, identification, request=request)
+        return _only(*check_in_many([booking], request=request))
 
 
-def _last_night_stayed(booking):
+def check_in_many(bookings, *, request=None):
+    """
+    Check several bookings in together (a group), in a fixed number of
+    queries. Each follows the same rules as a single check-in; one that can't
+    go ahead (room not ready, no ID, wrong day) is skipped with the reason.
+    Returns (checked_in, skipped) where skipped is [(booking, error)].
+    """
+    today, now = business_date(), timezone.now()
+    ready = ([Room.Housekeeping.INSPECTED] if settings.REQUIRE_ROOM_INSPECTION
+             else [Room.Housekeeping.CLEAN, Room.Housekeeping.INSPECTED])
+    with transaction.atomic():
+        locked = _lock_many(bookings)
+        rooms = {room.pk: room for room in Room.objects.select_for_update(of=('self',)).select_related('room_type')
+                 .filter(pk__in=sorted({b.room_id for b in locked})).order_by('pk')}
+        occupied = set(Booking.objects.filter(room__in=rooms, status=Status.CHECKED_IN)
+                       .exclude(pk__in=[b.pk for b in locked]).values_list('room_id', flat=True))
+        with_id = set(valid_identifications().filter(guest__in={b.guest_id for b in locked})
+                      .values_list('guest_id', flat=True)) if settings.REQUIRE_GUEST_ID_AT_CHECK_IN else set()
+
+        done, skipped = [], []
+        for booking in locked:
+            room = rooms[booking.room_id]
+            try:
+                _ensure_can_become(booking, Status.CHECKED_IN)
+                if settings.REQUIRE_GUEST_ID_AT_CHECK_IN and booking.guest_id not in with_id:
+                    raise BookingError("A valid ID document must be recorded before check-in.", field='identification')
+                if today < booking.check_in_date:
+                    raise BookingError(f"This booking arrives on {booking.check_in_date}; it can't be checked in yet.")
+                if today >= booking.check_out_date:
+                    raise BookingError("This booking's stay has already ended.")
+                if room.status in Room.UNSELLABLE_STATUSES:
+                    raise RoomUnavailableError(f"Room {room.room_number} is {room.get_status_display().lower()}. "
+                                               "Move the booking to another room first.")
+                if settings.REQUIRE_CLEAN_ROOM_AT_CHECK_IN and room.housekeeping_status not in ready:
+                    raise RoomUnavailableError(
+                        f"Room {room.room_number} is {room.get_housekeeping_status_display().lower()}; "
+                        "housekeeping must finish it first (or move the guest to a ready room)."
+                    )
+                if room.pk in occupied:
+                    raise RoomUnavailableError(f"Room {room.room_number} is still occupied by an in-house guest.")
+            except BookingError as e:
+                skipped.append((booking, e))
+                continue
+            booking.status = Status.CHECKED_IN
+            booking.checked_in_at = now
+            room.status = Room.Status.OCCUPIED
+            room.updated_at = now
+            occupied.add(room.pk)
+            done.append(booking)
+
+        _saved(done, ['status', 'checked_in_at'])
+        Room.objects.bulk_update([rooms[b.room_id] for b in done], ['status', 'updated_at'])
+        billing.folios_for(done)  # open the bills so extras can be posted from the first hour
+
+    record_many(AuditLog.Action.BOOKING_CHECKED_IN, done, request=request,
+                changes=lambda b: {'room': rooms[b.room_id].room_number})
+    return done, skipped
+
+
+def _last_night_stayed(booking, today=None):
     """The last night to bill: the night before departure, or before today for an early departure."""
-    today = business_date()
+    today = today or business_date()
     departure = min(booking.check_out_date, max(today, booking.check_in_date + timedelta(days=1)))
     return departure - timedelta(days=1)
 
@@ -173,48 +247,83 @@ def check_out(booking, *, transfer_to_account=None, request=None, notify_guest=T
     CHECKOUT_REQUIRES_SETTLED_FOLIO, check-out is refused while money is owed.
     `notify_guest=False` leaves the thank-you to the caller (a group check-out sends one).
     """
-    with transaction.atomic():
-        booking = _lock(booking)
-        _ensure_can_become(booking, Status.CHECKED_OUT)
-
-        billing.post_room_charges(booking, through_date=_last_night_stayed(booking), request=request)
-        folio = billing.folio_for(booking)
-        if transfer_to_account is not None:
-            billing.transfer_to_account(folio, transfer_to_account, request=request)
-        elif folio.balance == 0:
-            billing.settle(folio, request=request)
-        elif settings.CHECKOUT_REQUIRES_SETTLED_FOLIO and folio.balance > 0:
-            raise BillingError(
-                f"The guest owes {folio.balance} {folio.currency}. Take payment or bill it to a company account first.",
-            )
-
-        booking.status = Status.CHECKED_OUT
-        booking.checked_out_at = timezone.now()
-        booking.save(update_fields=['status', 'checked_out_at', 'updated_at'])
-
-        room = Room.objects.select_for_update().get(pk=booking.room_id)
-        if room.status == Room.Status.OCCUPIED:
-            room.status = Room.Status.AVAILABLE
-            room.save(update_fields=['status', 'updated_at'])
-        mark_dirty(room, request=request, reason=f"Check-out {booking.confirmation_number}")
-
-    revoke_keys(booking, reason='Checked out', request=request)
+    with transaction.atomic():  # a refused check-out doesn't keep the room charges it posted either
+        booking = _only(*check_out_many([booking], transfer_to_account=transfer_to_account, request=request))
     if notify_guest:
         notify('checked_out', booking)
-    early = business_date() < booking.check_out_date
-    record(AuditLog.Action.BOOKING_CHECKED_OUT, request=request, target=booking,
-           changes={'early_departure': early} if early else None)
     return booking
 
 
-def _post_penalty(booking, description, request):
-    """Charge the policy penalty to the folio, where it nets against any prepayment."""
-    if booking.penalty_amount > 0:
-        billing.post_charge(
-            billing.folio_for(booking), category=ChargeCategory.PENALTY,
-            description=f"{description} - {booking.confirmation_number}",
-            unit_price=booking.penalty_amount, source=f'booking:{booking.pk}', request=request,
-        )
+def check_out_many(bookings, *, transfer_to_account=None, request=None):
+    """
+    Check several bookings out together (a group), in a fixed number of
+    queries: room nights posted, paid bills settled with their invoices,
+    rooms freed and marked for cleaning, keys revoked. A booking whose bill
+    still owes money (with CHECKOUT_REQUIRES_SETTLED_FOLIO) is skipped with the
+    reason and stays in house. Returns (checked_out, skipped). The caller
+    sends the guest's thank-you.
+    """
+    today, now = business_date(), timezone.now()
+    with transaction.atomic():
+        candidates, skipped = [], []
+        for booking in _lock_many(bookings):
+            try:
+                _ensure_can_become(booking, Status.CHECKED_OUT)
+            except InvalidTransitionError as e:
+                skipped.append((booking, e))
+                continue
+            candidates.append(booking)
+
+        billing.post_room_charges_for(candidates, through_date={b.pk: _last_night_stayed(b, today) for b in candidates},
+                                      request=request)
+        folios = billing.folios_for(candidates)
+        credits = billing.folio_credits(folios.values())
+        done, to_settle = [], []
+        for booking in candidates:
+            folio, balance = folios[booking.pk], -credits[folios[booking.pk].pk]
+            if transfer_to_account is None and settings.CHECKOUT_REQUIRES_SETTLED_FOLIO and balance > 0:
+                skipped.append((booking, BillingError(
+                    f"The guest owes {money(balance)} {folio.currency}. Take payment or bill it to a company account first.")))
+                continue
+            if transfer_to_account is None and balance == 0:
+                to_settle.append(folio)
+            done.append(booking)
+        if transfer_to_account is not None:
+            for booking in done:  # the city-ledger transfer checks the company's credit for each bill in turn
+                billing.transfer_to_account(folios[booking.pk], transfer_to_account, request=request)
+        billing.settle_many(to_settle, request=request)
+
+        for booking in done:
+            booking.status = Status.CHECKED_OUT
+            booking.checked_out_at = now
+        _saved(done, ['status', 'checked_out_at'])
+        rooms = list(Room.objects.select_for_update(of=('self',)).select_related('room_type')
+                     .filter(pk__in=sorted({b.room_id for b in done})).order_by('pk'))
+        freed = [room for room in rooms if room.status == Room.Status.OCCUPIED]
+        for room in freed:
+            room.status = Room.Status.AVAILABLE
+            room.updated_at = now
+        Room.objects.bulk_update(freed, ['status', 'updated_at'])
+        set_rooms_status(rooms, Room.Housekeeping.DIRTY, request=request,
+                         reasons={b.room_id: f"Check-out {b.confirmation_number}" for b in done})
+
+    revoke_keys_for(done, reason='Checked out', request=request)
+    record_many(AuditLog.Action.BOOKING_CHECKED_OUT, done, request=request,
+                changes=lambda b: {'early_departure': True} if today < b.check_out_date else None)
+    return done, skipped
+
+
+def _post_penalties(bookings, description, request):
+    """Charge each booking's policy penalty to its folio, where it nets against any prepayment (all at once)."""
+    charged = [b for b in bookings if b.penalty_amount > 0]
+    if not charged:
+        return
+    folios = billing.folios_for(charged)
+    billing.post_charges([{
+        'folio': folios[booking.pk], 'category': ChargeCategory.PENALTY,
+        'description': f"{description} - {booking.confirmation_number}",
+        'unit_price': booking.penalty_amount, 'source': f'booking:{booking.pk}',
+    } for booking in charged], request=request)
 
 
 def _apply_penalty(booking, penalty, waive, reason):
@@ -233,73 +342,97 @@ def cancel(booking, *, reason='', waive_penalty=False, request=None, by_guest=Fa
     Unpaid holds are released free of charge. Only staff may waive penalties.
     `notify_guest=False` leaves the message to the caller (a group cancellation sends one).
     """
-    if by_guest and waive_penalty:
-        raise BookingError("Guests cannot waive cancellation penalties.")
-
-    with transaction.atomic():
-        booking = _lock(booking)
-        _ensure_can_become(booking, Status.CANCELLED)
-
-        penalty = Decimal('0.00') if booking.status == Status.PENDING else cancellation_penalty(booking)
-        _apply_penalty(booking, penalty, waive_penalty, reason)
-        booking.status = Status.CANCELLED
-        booking.cancelled_at = timezone.now()
-        booking.cancellation_reason = reason
-        booking.save(update_fields=[
-            'status', 'cancelled_at', 'cancellation_reason', 'penalty_amount', 'penalty_waived', 'updated_at',
-        ])
-        _post_penalty(booking, "Late cancellation fee", request)
-
-    record(AuditLog.Action.BOOKING_CANCELLED, request=request, target=booking,
-           actor_email=booking.guest.email if by_guest else '',
-           changes={'penalty': str(booking.penalty_amount), 'waived': booking.penalty_waived,
-                    'policy_penalty': str(penalty), 'by_guest': by_guest, 'reason': reason})
-    # Money prepaid online beyond the fee goes straight back to the guest's card (outside the
-    # cancellation's transaction: a slow or failing gateway never blocks the cancellation itself)
-    from payments.services import refund_prepaid_remainder
-    refund_prepaid_remainder(booking, request=request)
+    booking = _only(*cancel_many([booking], reason=reason, waive_penalty=waive_penalty, request=request,
+                                 by_guest=by_guest))
     if notify_guest:
         notify('booking_cancelled', booking)
     return booking
 
 
-def mark_no_show(booking, *, waive_penalty=False, reason='', request=None):
+def cancel_many(bookings, *, reason='', waive_penalty=False, request=None, by_guest=False):
+    """
+    Cancel several bookings together (a group) under the cancellation policy,
+    in a fixed number of queries: one lock, one update, the fees posted
+    together, one audit insert, and money prepaid online beyond the fees
+    refunded once per payment rather than once per room. A booking that can't
+    be cancelled is skipped with the reason. Returns (cancelled, skipped).
+    """
+    if by_guest and waive_penalty:
+        raise BookingError("Guests cannot waive cancellation penalties.")
+
+    now = timezone.now()
     with transaction.atomic():
-        booking = _lock(booking)
-        _ensure_can_become(booking, Status.NO_SHOW)
-        if business_date() < booking.check_in_date:
-            raise BookingError("A booking can't be marked as a no-show before its arrival date.")
+        done, skipped, policy = [], [], {}
+        for booking in _lock_many(bookings):
+            try:
+                _ensure_can_become(booking, Status.CANCELLED)
+            except InvalidTransitionError as e:
+                skipped.append((booking, e))
+                continue
+            penalty = Decimal('0.00') if booking.status == Status.PENDING else cancellation_penalty(booking, at=now)
+            _apply_penalty(booking, penalty, waive_penalty, reason)
+            policy[booking.pk] = penalty
+            booking.status = Status.CANCELLED
+            booking.cancelled_at = now
+            booking.cancellation_reason = reason
+            done.append(booking)
+        _saved(done, ['status', 'cancelled_at', 'cancellation_reason', 'penalty_amount', 'penalty_waived'])
+        _post_penalties(done, "Late cancellation fee", request)
 
-        penalty = penalty_for(booking)
-        _apply_penalty(booking, penalty, waive_penalty, reason)
-        booking.status = Status.NO_SHOW
-        booking.cancellation_reason = reason
-        booking.save(update_fields=['status', 'cancellation_reason', 'penalty_amount', 'penalty_waived', 'updated_at'])
-        _post_penalty(booking, "No-show fee", request)
+    record_many(AuditLog.Action.BOOKING_CANCELLED, done, request=request,
+                actor_email=done[0].guest.email if by_guest and done else '',
+                changes=lambda b: {'penalty': str(b.penalty_amount), 'waived': b.penalty_waived,
+                                   'policy_penalty': str(policy[b.pk]), 'by_guest': by_guest, 'reason': reason})
+    # Money prepaid online beyond the fee goes straight back to the guest's card (outside the
+    # cancellation's transaction: a slow or failing gateway never blocks the cancellation itself)
+    from payments.services import refund_prepaid_remainders
+    refund_prepaid_remainders(done, request=request)
+    return done, skipped
 
-    record(AuditLog.Action.BOOKING_NO_SHOW, request=request, target=booking,
-           changes={'penalty': str(booking.penalty_amount), 'waived': booking.penalty_waived})
-    return booking
+
+def mark_no_show(booking, *, waive_penalty=False, reason='', request=None):
+    return _only(*mark_no_shows([booking], waive_penalty=waive_penalty, reason=reason, request=request))
+
+
+def mark_no_shows(bookings, *, waive_penalty=False, reason='', request=None):
+    """Mark several bookings as no-shows (the night audit), fees posted together. Returns (marked, skipped)."""
+    today = business_date()
+    with transaction.atomic():
+        done, skipped = [], []
+        for booking in _lock_many(bookings):
+            try:
+                _ensure_can_become(booking, Status.NO_SHOW)
+                if today < booking.check_in_date:
+                    raise BookingError("A booking can't be marked as a no-show before its arrival date.")
+            except BookingError as e:
+                skipped.append((booking, e))
+                continue
+            _apply_penalty(booking, penalty_for(booking), waive_penalty, reason)
+            booking.status = Status.NO_SHOW
+            booking.cancellation_reason = reason
+            done.append(booking)
+        _saved(done, ['status', 'cancellation_reason', 'penalty_amount', 'penalty_waived'])
+        _post_penalties(done, "No-show fee", request)
+
+    record_many(AuditLog.Action.BOOKING_NO_SHOW, done, request=request,
+                changes=lambda b: {'penalty': str(b.penalty_amount), 'waived': b.penalty_waived})
+    return done, skipped
 
 
 def expire_holds(now=None):
     """Cancel PENDING bookings whose payment hold has lapsed. Returns how many were expired."""
     now = now or timezone.now()
-    expired = 0
-    candidates = Booking.objects.filter(status=Status.PENDING, hold_expires_at__lte=now).values_list('pk', flat=True)
-    for pk in candidates:
-        with transaction.atomic():
-            booking = Booking.objects.select_for_update().get(pk=pk)
-            # Re-check under the lock: payment may have confirmed it meanwhile
-            if booking.status != Status.PENDING or booking.hold_expires_at > now:
-                continue
+    with transaction.atomic():
+        # Selected under the lock, so a hold confirmed by a payment meanwhile is left alone
+        expired = list(Booking.objects.select_for_update().filter(status=Status.PENDING, hold_expires_at__lte=now)
+                       .order_by('pk'))
+        for booking in expired:
             booking.status = Status.CANCELLED
             booking.cancelled_at = now
             booking.cancellation_reason = HOLD_EXPIRED_REASON
-            booking.save(update_fields=['status', 'cancelled_at', 'cancellation_reason', 'updated_at'])
-        record(AuditLog.Action.BOOKING_HOLD_EXPIRED, target=booking)
-        expired += 1
-    return expired
+        _saved(expired, ['status', 'cancelled_at', 'cancellation_reason'])
+    record_many(AuditLog.Action.BOOKING_HOLD_EXPIRED, expired)
+    return len(expired)
 
 
 MODIFIABLE_FIELDS = {'check_in_date', 'check_out_date', 'room_type', 'room', 'number_of_adults',

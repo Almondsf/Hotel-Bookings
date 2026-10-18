@@ -3,7 +3,16 @@ from hotel.money import ZERO, money
 
 
 def active_rules():
+    """The tax rules in force. Load them once and pass them on when pricing many things."""
     return list(TaxRule.objects.filter(is_active=True))
+
+
+def rules_for(serializer):
+    """Active tax rules loaded once per response, shared by every row a serializer renders."""
+    root = serializer.root
+    if not hasattr(root, '_tax_rules'):
+        root._tax_rules = active_rules()
+    return root._tax_rules
 
 
 def compute_taxes(category, net_amount, rules=None):
@@ -21,7 +30,7 @@ def compute_taxes(category, net_amount, rules=None):
     return total, lines
 
 
-def quote(category, net_amount):
+def quote(category, net_amount, rules=None):
     """Net, taxes and gross for showing a price before it is charged."""
-    tax_total, lines = compute_taxes(category, net_amount)
+    tax_total, lines = compute_taxes(category, net_amount, rules)
     return {'net': money(net_amount), 'taxes': tax_total, 'gross': money(net_amount) + tax_total, 'tax_lines': lines}

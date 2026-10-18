@@ -5,8 +5,9 @@ its own, so one room that isn't ready (still being cleaned, money owed)
 doesn't hold up the others; the result says what happened to every room.
 The guest gets one message for the group instead of one per room.
 """
+from django.db import transaction
+
 from hotel.clock import business_date
-from hotel.errors import DomainError
 from notifications.services import notify
 
 from . import lifecycle
@@ -26,17 +27,11 @@ def _outcome(booking, error=''):
             'ok': not error, 'error': error}
 
 
-def _each(bookings, action):
-    """Run `action` on every booking, collecting failures instead of stopping. Returns (done, results)."""
-    done, results = [], []
-    for booking in bookings:
-        try:
-            done.append(action(booking))
-        except DomainError as e:
-            results.append(_outcome(booking, e.message))
-        else:
-            results.append(_outcome(booking))
-    return done, results
+def _results(bookings, done, skipped):
+    """Per-room outcome of a whole-group action, in the group's room order."""
+    errors = {booking.pk: error.message for booking, error in skipped}
+    acted = {booking.pk for booking in done}
+    return [_outcome(b, errors.get(b.pk, '' if b.pk in acted else 'Not changed.')) for b in bookings]
 
 
 def check_in_group(group, *, identification=None, request=None):
@@ -47,10 +42,11 @@ def check_in_group(group, *, identification=None, request=None):
     if not arriving:
         raise InvalidTransitionError("No rooms in this group are due to check in today.")
     # The group shares one booker, so an ID document recorded now covers every room
-    if identification:
-        lifecycle.record_identification(arriving[0].guest, identification, request=request)
-    _, results = _each(arriving, lambda b: lifecycle.check_in(b, request=request))
-    return results
+    with transaction.atomic():
+        if identification:
+            lifecycle.record_identification(arriving[0].guest, identification, request=request)
+        done, skipped = lifecycle.check_in_many(arriving, request=request)
+    return _results(arriving, done, skipped)
 
 
 def check_out_group(group, *, request=None):
@@ -58,10 +54,10 @@ def check_out_group(group, *, request=None):
     in_house = [b for b in group_bookings(group) if b.status == Status.CHECKED_IN]
     if not in_house:
         raise InvalidTransitionError("No rooms in this group are checked in.")
-    done, results = _each(in_house, lambda b: lifecycle.check_out(b, request=request, notify_guest=False))
+    done, skipped = lifecycle.check_out_many(in_house, request=request)
     if done:
         notify('group_checked_out', done[0])
-    return results
+    return _results(in_house, done, skipped)
 
 
 def cancellable(group):
@@ -73,8 +69,8 @@ def cancel_group(group, *, reason='', waive_penalty=False, request=None, by_gues
     rooms = cancellable(group)
     if not rooms:
         raise InvalidTransitionError("Nothing in this group can be cancelled.")
-    done, results = _each(rooms, lambda b: lifecycle.cancel(
-        b, reason=reason, waive_penalty=waive_penalty, request=request, by_guest=by_guest, notify_guest=False))
+    done, skipped = lifecycle.cancel_many(rooms, reason=reason, waive_penalty=waive_penalty, request=request,
+                                          by_guest=by_guest)
     if done:
         notify('group_cancelled', done[0])
-    return results
+    return _results(rooms, done, skipped)

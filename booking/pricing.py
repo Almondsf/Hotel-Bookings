@@ -25,15 +25,22 @@ def reprice(booking, room_type, *, reprice_from=None):
     they had a rate (e.g. after a room-type change). Updates and saves the
     booking's totals.
     """
-    agreed = {night.date: night.rate for night in booking.nightly_rates.all()}
+    nights = {night.date: night for night in booking.nightly_rates.all()}
     final = []
     for date, quote in stay_rates(booking, room_type):
-        keep = date in agreed and (reprice_from is None or date < reprice_from)
-        final.append((date, agreed[date] if keep else quote))
+        keep = date in nights and (reprice_from is None or date < reprice_from)
+        final.append((date, nights[date].rate if keep else quote))
 
+    # Nights dropped, changed and added: one query each, not one per night
     booking.nightly_rates.exclude(date__in=[d for d, _ in final]).delete()
+    changed = []
     for date, rate in final:
-        BookingNight.objects.update_or_create(booking=booking, date=date, defaults={'rate': rate})
+        if date in nights and nights[date].rate != rate:
+            nights[date].rate = rate
+            changed.append(nights[date])
+    BookingNight.objects.bulk_update(changed, ['rate'])
+    BookingNight.objects.bulk_create(BookingNight(booking=booking, date=date, rate=rate)
+                                     for date, rate in final if date not in nights)
 
     booking.total_price, booking.price_per_night = summarize(final)
     booking.save(update_fields=['total_price', 'price_per_night', 'updated_at'])

@@ -75,10 +75,16 @@ class FolioViewSet(CapabilityPerActionMixin, mixins.ListModelMixin, mixins.Retri
         if params.get('q'):
             q = params['q']
             queryset = queryset.filter(name__icontains=q) | queryset.filter(guest__last_name__icontains=q)
+        # Totals in the same query, for reading only: actions hand the folio to services, which need live totals
+        if self.action in ('list', 'retrieve'):
+            queryset = queryset.with_totals()
         return queryset
 
     def detail_response(self, folio, status_code=status.HTTP_200_OK):
-        return Response(FolioDetailSerializer(self.get_queryset().get(pk=folio.pk)).data, status=status_code)
+        folio = (Folio.objects.select_related('booking', 'guest', 'account').with_totals()
+                 .prefetch_related('charges__posted_by', 'payments__received_by', 'payments__transaction', 'invoices')
+                 .get(pk=folio.pk))
+        return Response(FolioDetailSerializer(folio).data, status=status_code)
 
     def create(self, request):
         """Open a folio for a non-staying customer."""
@@ -174,7 +180,11 @@ class InvoiceViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.
 class CorporateAccountViewSet(CapabilityPerActionMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
                              mixins.CreateModelMixin, mixins.UpdateModelMixin, viewsets.GenericViewSet):
     serializer_class = CorporateAccountSerializer
-    queryset = CorporateAccount.objects.all()
+
+    def get_queryset(self):
+        # Balances in the same query, for reading only (payments are recorded against a live account)
+        queryset = CorporateAccount.objects.all()
+        return queryset.with_balance() if self.action in ('list', 'retrieve', 'statement') else queryset
     default_capability = 'accounts.manage'
     capabilities = {'list': 'folios.view', 'retrieve': 'folios.view'}
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
@@ -193,7 +203,7 @@ class CorporateAccountViewSet(CapabilityPerActionMixin, mixins.ListModelMixin, m
     def statement(self, request, pk=None):
         """Transferred folios and payments, for sending to the company."""
         account = self.get_object()
-        folios = account.folios.filter(status=Folio.Status.TRANSFERRED).select_related('booking', 'guest')
+        folios = account.folios.filter(status=Folio.Status.TRANSFERRED).select_related('booking', 'guest').with_totals()
         return Response({
             'account': CorporateAccountSerializer(account).data,
             'folios': FolioSerializer(folios, many=True).data,

@@ -6,10 +6,13 @@ from rooms.models import Room, RoomType
 
 from django.utils import timezone
 
-from .models import Booking, BookingGroup, Guest, GuestIdentification
+from .models import Booking, BookingGroup, Guest, GuestIdentification, folio_totals_prefetch, valid_ids_prefetch
 from rates.models import RatePlan
 
-from .serializers import CancellationInfoMixin, PaymentSerializer, RatePlanInfoMixin, TaxQuoteMixin
+from .serializers import (
+    CancellationInfoMixin, PaymentSerializer, RatePlanInfoMixin, RoomRequestListSerializer, RoomRequestSerializer,
+    TaxQuoteMixin,
+)
 
 MAX_ROOMS_PER_RESERVATION = 30
 
@@ -107,12 +110,15 @@ class ReservationSerializer(RatePlanInfoMixin, TaxQuoteMixin, CancellationInfoMi
         return {'id': folio.pk, 'number': folio.number, 'status': folio.status, 'balance': str(folio.balance)}
 
 
-class ReservationRoomSerializer(serializers.Serializer):
-    room_type = serializers.PrimaryKeyRelatedField(queryset=RoomType.objects.all())
-    room = serializers.PrimaryKeyRelatedField(queryset=Room.objects.all(), required=False, allow_null=True,
-                                              help_text="A specific room; otherwise one is assigned.")
+class ReservationRoomSerializer(RoomRequestSerializer):
+    room_type = serializers.IntegerField(help_text="Room type id")
+    room = serializers.IntegerField(required=False, allow_null=True,
+                                    help_text="A specific room's id; otherwise one is assigned.")
     number_of_adults = serializers.IntegerField(min_value=1)
     number_of_children = serializers.IntegerField(min_value=0, default=0)
+
+    class Meta:
+        list_serializer_class = RoomRequestListSerializer
 
 
 class ReservationCreateSerializer(serializers.Serializer):
@@ -220,8 +226,10 @@ class BookingGroupSerializer(serializers.ModelSerializer):
     def _bookings(self, obj):
         if not hasattr(obj, '_rooms'):
             obj._rooms = list(
-                obj.bookings.select_related('guest', 'room__room_type', 'group', 'created_by', 'folio', 'rate_plan')
-                .prefetch_related('payment_transactions').order_by('pk'))
+                obj.bookings.select_related('guest', 'room__room_type', 'group', 'created_by', 'rate_plan')
+                .prefetch_related('payment_transactions', folio_totals_prefetch(),
+                                  valid_ids_prefetch('guest__identifications'))
+                .order_by('pk'))
         return obj._rooms
 
     @extend_schema_field(ReservationSerializer(many=True))

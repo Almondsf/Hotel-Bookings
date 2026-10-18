@@ -24,14 +24,16 @@ from audit.models import AuditLog
 from audit.services import record
 from billing.models import ExchangeRate
 from booking import lifecycle
-from booking.allocation import allocate_room, lock_room_types
+from booking.allocation import allocate_rooms, lock_room_types
 from booking.exceptions import BookingError
 from booking.models import Booking, BookingNight, Guest
 from booking.pricing import summarize
-from booking.services import generate_confirmation_number
+from booking.services import generate_confirmation_numbers
+from booking.signals import bookings_saved
 from hotel.clock import business_date
 from hotel.errors import DomainError
 from hotel.money import money
+from notifications.services import notify_many
 from rates.engine import RatePlanUnavailable, plan_nightly_rates
 from rates.models import RateRestriction
 from rooms.models import Room, RoomAvailabilityOverride
@@ -144,24 +146,52 @@ def push_ari(date_from=None, date_to=None):
     return {'availability_ranges': len(availability), 'restriction_ranges': len(restrictions)}
 
 
-def schedule_push(booking):
-    """After a booking changes, republish availability for its dates (once the change commits)."""
-    if active_connection() is None:
-        return
-    start, end = str(booking.check_in_date), str(booking.check_out_date)
-    transaction.on_commit(lambda: push_ari.enqueue(date_from=start, date_to=end))
+def schedule_push(*bookings):
+    """
+    After bookings change, republish availability for their dates once the
+    change commits. Changes are collected per transaction, so saving many
+    bookings costs one connection check and one push job, not one per booking.
+    """
+    pending = _pending_push_dates()
+    for booking in bookings:
+        pending.update((booking.check_in_date, booking.check_out_date))
+    transaction.on_commit(_flush_push)
+
+
+def _pending_push_dates():
+    conn = transaction.get_connection()
+    if not hasattr(conn, 'pending_ari_dates'):
+        conn.pending_ari_dates = set()
+    return conn.pending_ari_dates
+
+
+def _flush_push():
+    pending = _pending_push_dates()
+    if not pending:
+        return  # an earlier callback of this transaction already pushed
+    start, end = min(pending), max(pending)
+    pending.clear()
+    if active_connection() is not None:
+        push_ari.enqueue(date_from=str(start), date_to=str(end))
 
 
 # --- Inbound ----------------------------------------------------------------
 
-def _to_hotel_currency(amount, currency):
-    amount = Decimal(str(amount))
+def _exchange_rate(currency):
+    """The rate to convert `currency` into the hotel currency (None when it already is), looked up once."""
     if not currency or currency == settings.HOTEL_CURRENCY:
-        return money(amount)
+        return None
     rate = ExchangeRate.objects.filter(currency=currency).first()
     if rate is None:
         raise DomainError(f"No exchange rate for {currency}")
-    return money(amount * rate.rate)
+    return rate.rate
+
+
+def _to_hotel_currency(amount, currency, rate=None):
+    amount = Decimal(str(amount))
+    if not currency or currency == settings.HOTEL_CURRENCY:
+        return money(amount)
+    return money(amount * (rate if rate is not None else _exchange_rate(currency)))
 
 
 def _create_bookings(connection, attributes):
@@ -187,34 +217,39 @@ def _create_bookings(connection, attributes):
             email=(customer.get('mail') or f"ota-{attributes.get('booking_id')}@invalid.example")[:254],
             phone_number=(customer.get('phone') or '')[:15], country=(customer.get('country') or '')[:40],
         )
-        created, taken = [], []
-        for item in rooms:
-            room_type = room_maps[item['room_type_id']]
-            room = allocate_room(room_type, check_in, check_out, taken=taken)
-            taken.append(room.pk)
+        allocated = allocate_rooms([(room_maps[item['room_type_id']], None) for item in rooms], check_in, check_out)
+        rate = _exchange_rate(currency)
+        created, stays, now = [], [], timezone.now()
+        for item, room, number in zip(rooms, allocated, generate_confirmation_numbers(len(rooms))):
             days = item.get('days') or {}
-            rates = [(d, _to_hotel_currency(days.get(str(d), 0), currency)) for d in _days(check_in, check_out)]
+            rates = [(d, _to_hotel_currency(days.get(str(d), 0), currency, rate)) for d in _days(check_in, check_out)]
             total, average = summarize(rates)
             occupancy = item.get('occupancy') or {}
-            booking = Booking.objects.create(
+            booking = Booking(
                 guest=guest, room=room, check_in_date=check_in, check_out_date=check_out,
                 number_of_adults=max(1, int(occupancy.get('adults') or 1)),
                 number_of_children=int(occupancy.get('children') or 0),
                 special_requests=(attributes.get('notes') or '')[:2000],
                 price_per_night=average, total_price=total,
-                status=Booking.Status.CONFIRMED, confirmed_at=timezone.now(), source=Booking.Source.OTA,
-                rate_plan=plan_maps.get(item.get('rate_plan_id')),
-                confirmation_number=generate_confirmation_number(),
+                status=Booking.Status.CONFIRMED, confirmed_at=now, source=Booking.Source.OTA,
+                rate_plan=plan_maps.get(item.get('rate_plan_id')), confirmation_number=number,
             )
-            BookingNight.objects.bulk_create(BookingNight(booking=booking, date=d, rate=r) for d, r in rates)
+            booking.validate()
             created.append(booking)
+            stays.append(rates)
+        Booking.objects.bulk_create(created)
+        BookingNight.objects.bulk_create(BookingNight(booking=booking, date=d, rate=r)
+                                         for booking, rates in zip(created, stays) for d, r in rates)
+        bookings_saved.send(sender=Booking, bookings=created)
     return created
 
 
 def _cancel_linked(channel_booking, reason):
-    for booking in channel_booking.bookings.filter(status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED]):
-        # The OTA applies its own cancellation terms to the guest
-        lifecycle.cancel(booking, reason=reason, waive_penalty=True)
+    # The OTA applies its own cancellation terms to the guest
+    cancelled, _ = lifecycle.cancel_many(
+        channel_booking.bookings.filter(status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED]),
+        reason=reason, waive_penalty=True)
+    notify_many('booking_cancelled', cancelled)
     return not channel_booking.bookings.filter(status=Booking.Status.CHECKED_IN).exists()
 
 

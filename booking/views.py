@@ -4,7 +4,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from audit.models import AuditLog
-from audit.services import record
+from audit.services import record, record_many
 from hotel.schema import extend_schema
 
 from . import groups, lifecycle
@@ -56,9 +56,8 @@ class CreateGroupBookingView(CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         group, bookings, txn = create_online_group_booking(serializer.validated_data)
-        for booking in bookings:
-            record(AuditLog.Action.BOOKING_CREATED, request=request, actor_email=booking.guest.email, target=booking,
-                   changes={'group': group.reference, 'source': 'WEBSITE'})
+        record_many(AuditLog.Action.BOOKING_CREATED, bookings, request=request, actor_email=group.booker.email,
+                    changes={'group': group.reference, 'source': 'WEBSITE'})
         return Response({
             'group_reference': group.reference,
             'bookings': BookingConfirmationSerializer(bookings, many=True).data,

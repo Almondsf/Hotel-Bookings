@@ -5,7 +5,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from audit.models import AuditLog
-from audit.services import record
+from audit.services import record, record_many
 from booking.models import Booking
 from hotel.errors import ConflictError, DomainError
 
@@ -40,21 +40,31 @@ def issue_keys(booking, *, cards=1, request=None):
 
 def revoke_keys(booking, *, reason, room=None, request=None):
     """Revoke the booking's active keys (optionally only those for `room`). Failures don't block the desk."""
-    keys = KeyCard.objects.filter(booking=booking, status=KeyCard.Status.ACTIVE)
+    return revoke_keys_for([booking], reason=reason, room=room, request=request)
+
+
+def revoke_keys_for(bookings, *, reason, room=None, request=None):
+    """
+    revoke_keys for several bookings (a group check-out). The lock system is
+    told about each card (it's a device call per card), but the database is
+    read and updated in a fixed number of queries. Returns how many were revoked.
+    """
+    keys = KeyCard.objects.filter(booking__in=bookings, status=KeyCard.Status.ACTIVE)
     if room is not None:
         keys = keys.filter(room=room)
     system = lock_system()
-    revoked = 0
+    revoked = {}  # booking id -> key ids
     for key in keys:
         try:
             system.revoke(key.external_id)
         except DomainError:
             # Keys expire at check-out time anyway; keep going and flag it
             continue
-        with transaction.atomic():
-            KeyCard.objects.filter(pk=key.pk).update(status=KeyCard.Status.REVOKED, revoked_at=timezone.now(),
-                                                     revoke_reason=reason[:100])
-        revoked += 1
-    if revoked:
-        record(AuditLog.Action.KEY_REVOKED, request=request, target=booking, changes={'cards': revoked, 'reason': reason})
-    return revoked
+        revoked.setdefault(key.booking_id, []).append(key.pk)
+    if not revoked:
+        return 0
+    KeyCard.objects.filter(pk__in=[pk for ids in revoked.values() for pk in ids]).update(
+        status=KeyCard.Status.REVOKED, revoked_at=timezone.now(), revoke_reason=reason[:100])
+    record_many(AuditLog.Action.KEY_REVOKED, [b for b in bookings if b.pk in revoked], request=request,
+                changes=lambda b: {'cards': len(revoked[b.pk]), 'reason': reason})
+    return sum(len(ids) for ids in revoked.values())

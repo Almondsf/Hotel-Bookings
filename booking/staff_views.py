@@ -16,7 +16,7 @@ from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializer
 
 from . import groups, lifecycle
 from .front_desk import room_board, walk_in
-from .models import Booking, BookingGroup, Guest
+from .models import Booking, BookingGroup, Guest, folio_totals_prefetch, valid_ids_prefetch
 from .services import create_staff_reservation
 from .staff_serializers import (
     BookingGroupSerializer,
@@ -65,8 +65,9 @@ class ReservationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
     def get_queryset(self):
         queryset = (
             Booking.objects
-            .select_related('guest', 'room__room_type', 'group', 'created_by', 'folio', 'rate_plan')
-            .prefetch_related('payment_transactions')
+            .select_related('guest', 'room__room_type', 'group', 'created_by', 'rate_plan')
+            # Folio totals and ID status for every row in a fixed number of queries
+            .prefetch_related('payment_transactions', folio_totals_prefetch(), valid_ids_prefetch('guest__identifications'))
             .order_by('check_in_date', 'id')
         )
         if self.action != 'list':
@@ -215,7 +216,7 @@ class GuestViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.Crea
         return GuestDetailSerializer if self.action == 'retrieve' else GuestProfileSerializer
 
     def get_queryset(self):
-        queryset = Guest.objects.order_by('last_name', 'first_name', 'id')
+        queryset = Guest.objects.order_by('last_name', 'first_name', 'id').prefetch_related(valid_ids_prefetch())
         if self.action != 'list':
             return queryset
         q = self.request.query_params.get('q', '').strip()
@@ -299,7 +300,8 @@ class BookingGroupViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
         return [HasCapability('bookings.view' if self.action == 'retrieve' else 'bookings.manage')()]
 
     def get_queryset(self):
-        return BookingGroup.objects.select_related('booker', 'created_by')
+        return BookingGroup.objects.select_related('booker', 'created_by').prefetch_related(
+            valid_ids_prefetch('booker__identifications'))
 
     def get_object(self):
         self.kwargs['reference'] = self.kwargs['reference'].upper()

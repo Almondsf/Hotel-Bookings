@@ -55,7 +55,8 @@ class OrderSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'status', 'folio', 'opened_at', 'settled_at', 'void_reason']
 
     def get_totals(self, obj) -> dict:
-        return {k: str(v) for k, v in services.totals(obj).items()}
+        from billing.taxes import rules_for
+        return {k: str(v) for k, v in services.totals(obj, rules_for(self)).items()}
 
 
 class AddItemSerializer(serializers.Serializer):

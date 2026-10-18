@@ -3,11 +3,9 @@ from .models import Amenity, RoomImage, RoomPricing, RoomAvailabilityOverride, R
 from django.conf import settings
 from django.utils import timezone
 
+from decimal import ROUND_HALF_UP, Decimal
+
 from hotel.clock import business_date
-from rooms.services import (
-    calculate_average_price_per_night,
-    calculate_total_price
-)
 
 
 class RoomSearchQuerySerializer(serializers.Serializer):
@@ -73,6 +71,8 @@ class RoomTypeDetailSerializer(serializers.ModelSerializer):
     
     def get_available_room_count(self, obj) -> int:
         """Returns count of sellable rooms of this type"""
+        if hasattr(obj, 'sellable_rooms'):  # annotated by the room type list
+            return obj.sellable_rooms
         return obj.rooms.exclude(status__in=Room.UNSELLABLE_STATUSES).count()
 
 class RoomTypeAvailabilitySerializer(serializers.ModelSerializer):
@@ -92,36 +92,38 @@ class RoomTypeAvailabilitySerializer(serializers.ModelSerializer):
             'price_per_night', 'total_price', 'taxes', 'total_with_taxes', 'primary_image', 'rate_plans'
         ]
 
-    def get_price_per_night(self, obj):
+    def _stay(self):
         """
-        Returns the average nightly price across the stay
+        One StayContext per response (or the view's, shared with other
+        serializers), so pricing many room types costs a fixed number of queries.
         """
-        check_in = self.context.get('check_in_date')
-        check_out = self.context.get('check_out_date')
+        from rates.engine import StayContext
 
+        check_in, check_out = self.context.get('check_in_date'), self.context.get('check_out_date')
         if not check_in or not check_out:
             return None
+        if self.context.get('stay') is None:
+            self.context['stay'] = StayContext(check_in, check_out)
+        return self.context['stay']
 
-        return calculate_average_price_per_night(obj, check_in, check_out)
+    def get_price_per_night(self, obj):
+        """Average nightly price across the stay."""
+        stay = self._stay()
+        if stay is None:
+            return None
+        nights = (stay.check_out_date - stay.check_in_date).days
+        return (stay.bar_total(obj) / nights).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     def get_total_price(self, obj):
-        """
-        Returns total price between check-in and check-out dates
-        """
-        check_in = self.context.get('check_in_date')
-        check_out = self.context.get('check_out_date')
-
-        if not check_in or not check_out:
-            return None
-
-        total = calculate_total_price(obj, check_in, check_out)
-        return total
+        """Total price for the stay at the best available rate."""
+        stay = self._stay()
+        return stay.bar_total(obj) if stay is not None else None
 
     def _quote(self, obj):
         from billing.models import ChargeCategory
-        from billing.taxes import quote
+        from billing.taxes import quote, rules_for
         total = self.get_total_price(obj)
-        return quote(ChargeCategory.ROOM, total) if total is not None else None
+        return quote(ChargeCategory.ROOM, total, rules_for(self)) if total is not None else None
 
     def get_taxes(self, obj) -> str:
         q = self._quote(obj)
@@ -134,15 +136,16 @@ class RoomTypeAvailabilitySerializer(serializers.ModelSerializer):
     def get_rate_plans(self, obj):
         """Bookable rate plans for this stay, cheapest first, with taxes."""
         from billing.models import ChargeCategory
-        from billing.taxes import quote
+        from billing.taxes import quote, rules_for
         from rates.engine import quote_plans
 
-        check_in, check_out = self.context.get('check_in_date'), self.context.get('check_out_date')
-        if not check_in or not check_out:
+        stay = self._stay()
+        if stay is None:
             return []
+        check_in, check_out = stay.check_in_date, stay.check_out_date
         plans = []
-        for plan_quote in quote_plans(obj, check_in, check_out, promo_code=self.context.get('promo_code')):
-            plan, priced = plan_quote.plan, quote(ChargeCategory.ROOM, plan_quote.total)
+        for plan_quote in quote_plans(obj, check_in, check_out, promo_code=self.context.get('promo_code'), ctx=stay):
+            plan, priced = plan_quote.plan, quote(ChargeCategory.ROOM, plan_quote.total, rules_for(self))
             plans.append({
                 'code': plan.code, 'name': plan.name, 'description': plan.description,
                 'meal_plan': plan.meal_plan, 'meal_plan_name': plan.get_meal_plan_display(),

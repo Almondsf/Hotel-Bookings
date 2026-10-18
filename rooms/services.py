@@ -1,27 +1,29 @@
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
+from django.db.models import Count
+
 from booking.models import Booking
-from rooms.models import Room, RoomAvailabilityOverride, RoomType
+from rooms.models import Room, RoomAvailabilityOverride, RoomPricing, RoomType
 
 # Upper bound on rooms in a suggested multi-room plan, and on plans explored,
 # so large parties can't make the search blow up combinatorially.
 MAX_ROOMS_PER_PLAN = 10
 MAX_PLANS_EXPLORED = 5000
 
-def get_available_rooms_for_type(room_type, check_in_date, check_out_date, exclude_booking=None):
+def free_rooms(check_in_date, check_out_date, exclude_booking=None, exclude_bookings=()):
     """
-    Rooms of `room_type` free for the whole stay. `exclude_booking` ignores
-    that booking's own hold, for re-checking availability when modifying it.
+    Rooms (of any type) free for the whole stay. `exclude_booking(s)` ignores
+    those bookings' own holds, for re-checking availability when modifying or
+    confirming them.
     """
     conflicting_bookings = Booking.objects.blocking().overlapping(check_in_date, check_out_date)
-    if exclude_booking is not None:
-        conflicting_bookings = conflicting_bookings.exclude(pk=exclude_booking.pk)
+    excluded = [b.pk for b in exclude_bookings] + ([exclude_booking.pk] if exclude_booking is not None else [])
+    if excluded:
+        conflicting_bookings = conflicting_bookings.exclude(pk__in=excluded)
 
-    return Room.objects.filter(
-        room_type=room_type,
-    ).exclude(
+    return Room.objects.exclude(
         status__in=Room.UNSELLABLE_STATUSES
     ).exclude(
         id__in=conflicting_bookings.values("room_id")
@@ -33,13 +35,36 @@ def get_available_rooms_for_type(room_type, check_in_date, check_out_date, exclu
     )
 
 
-def nightly_rates(room_type, check_in_date, check_out_date):
-    """[(date, rate)] for each night of the stay (check-out night excluded)."""
+def get_available_rooms_for_type(room_type, check_in_date, check_out_date, exclude_booking=None):
+    """Rooms of `room_type` free for the whole stay."""
+    return free_rooms(check_in_date, check_out_date, exclude_booking).filter(room_type=room_type)
+
+
+def available_counts(check_in_date, check_out_date):
+    """{room_type_id: free rooms} for the stay, for every room type at once (one query)."""
+    return dict(free_rooms(check_in_date, check_out_date).values('room_type')
+                .annotate(free=Count('id')).values_list('room_type', 'free'))
+
+
+def seasonal_prices(check_in_date, check_out_date):
+    """{room_type_id: [RoomPricing]} overlapping the stay, for every room type at once (one query)."""
+    by_type = defaultdict(list)
+    for pricing in RoomPricing.objects.filter(start_date__lt=check_out_date, end_date__gte=check_in_date):
+        by_type[pricing.room_type_id].append(pricing)
+    return by_type
+
+
+def nightly_rates(room_type, check_in_date, check_out_date, pricings=None):
+    """
+    [(date, rate)] for each night of the stay (check-out night excluded).
+    `pricings`: the room type's seasonal prices already loaded (see seasonal_prices).
+    """
     # One query for all seasonal rates overlapping the stay instead of one per night
-    pricings = list(room_type.pricings.filter(
-        start_date__lt=check_out_date,
-        end_date__gte=check_in_date
-    ))
+    if pricings is None:
+        pricings = list(room_type.pricings.filter(
+            start_date__lt=check_out_date,
+            end_date__gte=check_in_date
+        ))
 
     rates = []
     current_date = check_in_date
@@ -53,8 +78,21 @@ def nightly_rates(room_type, check_in_date, check_out_date):
     return rates
 
 
-def calculate_total_price(room_type, check_in_date, check_out_date) -> Decimal:
-    return sum((rate for _, rate in nightly_rates(room_type, check_in_date, check_out_date)), Decimal("0.00"))
+def calculate_total_price(room_type, check_in_date, check_out_date, pricings=None) -> Decimal:
+    return sum((rate for _, rate in nightly_rates(room_type, check_in_date, check_out_date, pricings)), Decimal("0.00"))
+
+
+def stay_inventory(check_in_date, check_out_date):
+    """
+    [(room_type, free rooms, stay price)] for every room type with a free room,
+    in a fixed number of queries (photos included). Build it once per search
+    and pass it to the plan builders.
+    """
+    counts = available_counts(check_in_date, check_out_date)
+    prices = seasonal_prices(check_in_date, check_out_date)
+    return [(room_type, counts[room_type.pk],
+             calculate_total_price(room_type, check_in_date, check_out_date, prices[room_type.pk]))
+            for room_type in RoomType.objects.filter(pk__in=counts).prefetch_related('images')]
 
 
 def calculate_average_price_per_night(room_type, check_in_date, check_out_date) -> Decimal:
@@ -69,14 +107,17 @@ def rank_for_party(room_types, adults, children, check_in_date, check_out_date):
     spare places, so two adults see a double before a family suite), then the
     lowest price for the stay. Every room type passed in must already fit.
     """
+    prices = seasonal_prices(check_in_date, check_out_date)
+
     def key(room_type):
         spare = (room_type.max_adults - adults) + (room_type.max_children - children)
-        return spare, calculate_total_price(room_type, check_in_date, check_out_date), room_type.name
+        total = calculate_total_price(room_type, check_in_date, check_out_date, prices[room_type.pk])
+        return spare, total, room_type.name
 
     return sorted(room_types, key=key)
 
 
-def generate_booking_plans(check_in_date, check_out_date, adults, children):
+def generate_booking_plans(check_in_date, check_out_date, adults, children, inventory=None):
     """
     Generate multiple room booking combinations when no single room fits everyone.
     Returns plans sorted by cheapest price and fewest rooms.
@@ -84,15 +125,8 @@ def generate_booking_plans(check_in_date, check_out_date, adults, children):
     nights = (check_out_date - check_in_date).days
 
     # 1. Available room count and stay price per room type, computed once
-    inventory = []
-    for room_type in RoomType.objects.all():
-        available_count = get_available_rooms_for_type(room_type, check_in_date, check_out_date).count()
-        if available_count:
-            inventory.append((
-                room_type,
-                available_count,
-                calculate_total_price(room_type, check_in_date, check_out_date),
-            ))
+    if inventory is None:
+        inventory = stay_inventory(check_in_date, check_out_date)
 
     # 2. Generate combinations within availability
     valid_plans = []
@@ -182,7 +216,7 @@ def split_party(room_types, adults, children):
     return [(room_types[i], placed_adults[i], placed_children[i]) for i in range(len(room_types))]
 
 
-def suggest_group_plans(check_in_date, check_out_date, adults, children, limit=3):
+def suggest_group_plans(check_in_date, check_out_date, adults, children, limit=3, inventory=None):
     """
     Ready-made multi-room plans for a party too big for one room, booked
     together as a group: the cheapest ("Best value"), the fewest rooms, and the
@@ -190,14 +224,11 @@ def suggest_group_plans(check_in_date, check_out_date, adults, children, limit=3
     are the best available rate for the stay, with and without taxes.
     """
     from billing.models import ChargeCategory
-    from billing.taxes import quote
+    from billing.taxes import active_rules, quote
 
     nights = (check_out_date - check_in_date).days
-    inventory = []
-    for room_type in RoomType.objects.all():
-        available = get_available_rooms_for_type(room_type, check_in_date, check_out_date).count()
-        if available:
-            inventory.append((room_type, available, calculate_total_price(room_type, check_in_date, check_out_date)))
+    if inventory is None:
+        inventory = stay_inventory(check_in_date, check_out_date)
 
     candidates = []
     for combination in _find_room_combinations(adults, children, inventory):
@@ -219,12 +250,12 @@ def suggest_group_plans(check_in_date, check_out_date, adults, children, limit=3
     def signature(plan):
         return tuple(sorted((rt.pk, a, c) for rt, a, c in plan['rooms']))
 
-    plans, seen = [], set()
+    plans, seen, tax_rules = [], set(), active_rules()
     for label, plan in [('Best value', cheapest), ('Fewest rooms', fewest), ('Most space', roomiest)]:
         if signature(plan) in seen:
             continue
         seen.add(signature(plan))
-        price = quote(ChargeCategory.ROOM, plan['total'])
+        price = quote(ChargeCategory.ROOM, plan['total'], tax_rules)
         plans.append({
             'label': label,
             'rooms': [{'room_type': rt, 'number_of_adults': a, 'number_of_children': c} for rt, a, c in plan['rooms']],

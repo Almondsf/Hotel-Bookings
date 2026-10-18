@@ -2,7 +2,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from audit.models import AuditLog
-from audit.services import record
+from audit.services import record, record_many
 from booking.models import Booking
 from hotel.clock import business_date
 from hotel.errors import ConflictError, DomainError
@@ -15,14 +15,25 @@ Task = HousekeepingTask
 
 def set_room_status(room, status, *, request=None, actor=None, reason=''):
     """Change a room's housekeeping status (cleaned, inspected, needs cleaning)."""
-    previous = room.housekeeping_status
-    if previous == status:
-        return room
-    Room.objects.filter(pk=room.pk).update(housekeeping_status=status, updated_at=timezone.now())
-    room.housekeeping_status = status
-    record(AuditLog.Action.ROOM_HOUSEKEEPING_CHANGED, request=request, actor=actor, target=room,
-           changes={'from': previous, 'to': status, 'reason': reason or None})
+    set_rooms_status([room], status, request=request, actor=actor, reasons={room.pk: reason})
     return room
+
+
+def set_rooms_status(rooms, status, *, request=None, actor=None, reasons=None):
+    """
+    set_room_status for several rooms in a fixed number of queries (one
+    update, one audit insert). `reasons` is {room id: reason}.
+    """
+    reasons = reasons or {}
+    changed = [room for room in rooms if room.housekeeping_status != status]
+    if not changed:
+        return
+    previous = {room.pk: room.housekeeping_status for room in changed}
+    Room.objects.filter(pk__in=previous).update(housekeeping_status=status, updated_at=timezone.now())
+    for room in changed:
+        room.housekeeping_status = status
+    record_many(AuditLog.Action.ROOM_HOUSEKEEPING_CHANGED, changed, request=request, actor=actor,
+                changes=lambda r: {'from': previous[r.pk], 'to': status, 'reason': reasons.get(r.pk) or None})
 
 
 def mark_dirty(room, *, request=None, reason=''):
@@ -40,7 +51,8 @@ def generate_daily_tasks(day=None):
     arriving = set(Booking.objects.blocking().filter(check_in_date=day).exclude(
         status=Booking.Status.CHECKED_IN).values_list('room_id', flat=True))
 
-    created = 0
+    existing = set(Task.objects.filter(date=day).values_list('room_id', 'task_type'))
+    new = []
     for room in Room.objects.exclude(status=Room.Status.OUT_OF_SERVICE):
         booking = in_house.get(room.pk)
         if booking and booking.check_out_date > day:
@@ -49,11 +61,11 @@ def generate_daily_tasks(day=None):
             task_type = Task.TaskType.DEPARTURE_CLEAN
         else:
             continue
-        _, was_created = Task.objects.get_or_create(
-            room=room, date=day, task_type=task_type, defaults={'is_rush': room.pk in arriving},
-        )
-        created += was_created
-    return created
+        if (room.pk, task_type) not in existing:
+            new.append(Task(room=room, date=day, task_type=task_type, is_rush=room.pk in arriving))
+    # ignore_conflicts: another worker may have generated the same tasks meanwhile (unique per room/day/type)
+    Task.objects.bulk_create(new, ignore_conflicts=True)
+    return len(new)
 
 
 def _lock(task):
