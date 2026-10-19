@@ -19,6 +19,8 @@ from pathlib import Path
 import environ
 from django.core.exceptions import ImproperlyConfigured
 
+from hotel.infra import cache_config, database_config
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -212,10 +214,12 @@ REQUIRE_ROOM_INSPECTION = env.bool('REQUIRE_ROOM_INSPECTION', default=False)
 # Nigerian hotels record guest ID at arrival; check-in is refused without one
 REQUIRE_GUEST_ID_AT_CHECK_IN = env.bool('REQUIRE_GUEST_ID_AT_CHECK_IN', default=True)
 
-# Rate limits and the refresh-token grace window live in the cache. One process can use the default
-# in-memory cache; several (e.g. gunicorn workers) need a shared one, e.g. CACHE_URL=redis://...
-# or CACHE_URL=dbcache://django_cache (then run `manage.py createcachetable`).
-CACHES = {'default': env.cache('CACHE_URL', default='locmemcache://')}
+# Rate limits, the refresh-token grace window and cached public pages live in the cache. One process
+# can use the default in-memory cache; several (gunicorn workers, more servers) need a shared one:
+# CACHE_URL=redis://redis:6379/0 (docker-compose runs Redis). `check --deploy` warns without one.
+CACHES = {'default': cache_config(env('CACHE_URL', default='locmemcache://'))}
+# How long public, rarely-changing responses (room types) are cached. Edits clear them at once.
+PUBLIC_CACHE_SECONDS = 0 if TESTING else env.int('PUBLIC_CACHE_SECONDS', default=300)
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=env.int('JWT_ACCESS_MINUTES', default=15)),
@@ -231,8 +235,16 @@ PASSWORD_RESET_TIMEOUT = env.int('PASSWORD_RESET_TIMEOUT', default=60 * 60 * 24)
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+# PostgreSQL connections are pooled (one pool per server process: size DB_POOL_MAX_SIZE to the
+# threads per process, and keep processes x pool size under the server's max_connections).
 DATABASES = {
-    'default': env.db('DATABASE_URL', default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}"),
+    'default': database_config(
+        env('DATABASE_URL', default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}"),
+        pool=False if TESTING else env.bool('DB_POOL', default=True),
+        pool_min=env.int('DB_POOL_MIN_SIZE', default=2),
+        pool_max=env.int('DB_POOL_MAX_SIZE', default=10),
+        conn_max_age=env.int('DB_CONN_MAX_AGE', default=60),
+    ),
 }
 
 # Email Configuration

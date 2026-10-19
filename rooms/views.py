@@ -10,6 +10,8 @@ from hotel.schema import ANY, DATE_RANGE, body, extend_schema, query, serializer
 
 from django.db.models import Count, Q
 
+from hotel import public_cache
+
 from .models import Room, RoomType
 from .serializers import (
     RoomSearchQuerySerializer,
@@ -87,6 +89,11 @@ class RoomTypeListView(generics.ListAPIView):
     pagination_class = None
     queryset = RoomType.objects.prefetch_related('amenities', 'images').annotate(
         sellable_rooms=Count('rooms', filter=~Q(rooms__status__in=Room.UNSELLABLE_STATUSES)))
+
+    def list(self, request, *args, **kwargs):
+        # Loaded by every page of the guest site; cached until a room type, room or photo changes
+        return Response(public_cache.cached('room-types', request, lambda: super(RoomTypeListView, self).list(
+            request, *args, **kwargs).data))
 
 
 class RoomListView(generics.ListAPIView):
@@ -201,3 +208,8 @@ class RoomTypeDetailView(generics.RetrieveAPIView):
     serializer_class = RoomTypeDetailSerializer
     permission_classes = [AllowAny]
     lookup_field = 'slug'
+
+    def retrieve(self, request, *args, **kwargs):
+        # Cached like the list; a missing room type (404) is never cached
+        return Response(public_cache.cached('room-type', request, lambda: super(RoomTypeDetailView, self).retrieve(
+            request, *args, **kwargs).data))

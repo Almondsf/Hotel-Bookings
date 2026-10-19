@@ -21,7 +21,8 @@
 
 ## Platform
 - `DEBUG=False` enables HTTPS redirect, HSTS (1 year, preload), secure cookies, `nosniff`, `DENY` framing and a strict referrer policy; `manage.py check --deploy` runs clean in CI.
-- Content-Security-Policy on Django pages (admin, API docs) and on the web app via nginx.
+- Content-Security-Policy on Django pages (admin, API docs) and on the web app via nginx. nginx's security headers live in `deploy/security-headers.conf` and are included in every location (nginx drops server-level headers in a location that adds its own, which had left the web app's pages without them).
+- nginx limits each address to 30 API requests a second (burst 60) before Django's own per-endpoint throttles; rate-limit counters are in Redis, shared by every server process (`check --deploy` warns otherwise).
 - Proxy client IPs are only trusted for `NUM_PROXIES` hops (no spoofed `X-Forwarded-For`).
 - The API is JSON-only in production; the browsable API and session auth exist only in development.
 - Append-only **audit log** of sign-ins (including failures), staff changes, money movements, ID reveals, rate changes, night audits and privacy actions, with actor and IP.

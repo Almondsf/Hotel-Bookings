@@ -13,9 +13,14 @@ jobs:
         env: {POSTGRES_DB: hotel, POSTGRES_USER: hotel, POSTGRES_PASSWORD: hotel}
         ports: ["5432:5432"]
         options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-retries 10
     env:
       DJANGO_SECRET_KEY: ci-only-secret
       DATABASE_URL: postgres://hotel:hotel@localhost:5432/hotel
+      REDIS_URL: redis://localhost:6379/0  # hotel/test_infra.py checks the shared cache against a real Redis
       FIELD_ENCRYPTION_KEYS: ${{ secrets.CI_FIELD_ENCRYPTION_KEY || 'cXdlcnR5dWlvcGFzZGZnaGprbHp4Y3Zibm0xMjM0NTY=' }}
     steps:
       - uses: actions/checkout@v5
@@ -26,13 +31,29 @@ jobs:
       - name: API docs are complete and valid
         run: python manage.py spectacular --validate --fail-on-warn --file /dev/null
       - run: python manage.py test --parallel
+      - name: Gunicorn settings load
+        run: pip install gunicorn==23.0.0 && gunicorn --check-config --config deploy/gunicorn.conf.py hotel.wsgi:application
       - name: Production settings audit
         run: python manage.py check --deploy --fail-level WARNING
         env:
           DJANGO_DEBUG: "False"
           DJANGO_ALLOWED_HOSTS: example.com
+          CACHE_URL: redis://localhost:6379/0
           # Throwaway value, long enough for the audit's strength check (never used outside CI)
           DJANGO_SECRET_KEY: ci-only-deploy-audit-key-7f3a9c2e5b8d1f4a6c0e9b2d7a5f3c8e1b4d6a9f
+
+  deploy-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: docker-compose file is valid
+        run: POSTGRES_PASSWORD=ci docker compose config --quiet
+      - name: nginx config is valid
+        run: >
+          docker run --rm --add-host api:127.0.0.1
+          -v "$PWD/deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro"
+          -v "$PWD/deploy/security-headers.conf:/etc/nginx/snippets/security-headers.conf:ro"
+          nginx:1.27-alpine nginx -t
 
   frontend:
     runs-on: ubuntu-latest

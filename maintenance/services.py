@@ -5,6 +5,7 @@ from audit.models import AuditLog
 from audit.services import record
 from booking.models import Booking
 from hotel.clock import business_date
+from hotel import public_cache
 from hotel.errors import ConflictError, DomainError
 from rooms.models import Room, RoomAvailabilityOverride
 
@@ -59,6 +60,7 @@ def _take_out_of_order(ticket, until, request):
     occupied = Booking.objects.filter(room=ticket.room, status=Booking.Status.CHECKED_IN).exists()
     if not occupied:
         Room.objects.filter(pk=ticket.room_id).update(status=Room.Status.MAINTENANCE, updated_at=timezone.now())
+        public_cache.invalidate()  # update() sends no signal; the room no longer counts as sellable
     return [b for b in affected_bookings(ticket.room, start, until) if b.status != Booking.Status.CHECKED_IN]
 
 
@@ -106,6 +108,7 @@ def resolve(ticket, *, request, notes):
                 block.save(update_fields=['end_date'])
             Room.objects.filter(pk=ticket.room_id, status=Room.Status.MAINTENANCE).update(
                 status=Room.Status.AVAILABLE, updated_at=timezone.now())
+            public_cache.invalidate()  # sellable again
         if ticket.room_id:
             mark_dirty(ticket.room, request=request, reason=f"After maintenance {ticket.number}")
     record(AuditLog.Action.MAINTENANCE_TICKET_UPDATED, request=request, target=ticket, changes={'status': 'RESOLVED'})

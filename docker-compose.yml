@@ -1,4 +1,4 @@
-# Production-style stack: Postgres, API, background worker and nginx.
+# Production-style stack: Postgres, Redis, API, background worker and nginx.
 #   cp .env.example .env   # fill in secrets
 #   docker compose up -d --build
 #   docker compose exec api python manage.py createsuperuser
@@ -15,18 +15,31 @@ services:
       interval: 10s
     restart: unless-stopped
 
+  # Shared cache for every API process: rate limits, the sign-in grace window, cached public pages.
+  # Nothing in it needs to survive a restart, so it runs without persistence.
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no --maxmemory 128mb --maxmemory-policy volatile-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+    restart: unless-stopped
+
   api:
     build: .
     image: hotel-pms:latest
     env_file: .env
     environment:
       DATABASE_URL: postgres://hotel:${POSTGRES_PASSWORD}@db:5432/hotel
+      CACHE_URL: redis://redis:6379/0
       DJANGO_DEBUG: "False"
       TASK_BACKEND: database
       NUM_PROXIES: "1"
     depends_on:
       db: {condition: service_healthy}
-    command: sh -c "python manage.py migrate --noinput && gunicorn hotel.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile -"
+      redis: {condition: service_healthy}
+    # Workers, threads and timeouts: deploy/gunicorn.conf.py (GUNICORN_* in .env)
+    command: sh -c "python manage.py migrate --noinput && gunicorn hotel.wsgi:application --config deploy/gunicorn.conf.py"
     volumes: [static:/app/staticfiles]
     restart: unless-stopped
 
@@ -35,6 +48,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgres://hotel:${POSTGRES_PASSWORD}@db:5432/hotel
+      CACHE_URL: redis://redis:6379/0
       DJANGO_DEBUG: "False"
       TASK_BACKEND: database
     depends_on:
@@ -48,6 +62,7 @@ services:
     ports: ["80:80"]
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/security-headers.conf:/etc/nginx/snippets/security-headers.conf:ro
       - static:/srv/static:ro
       - webapp:/srv/app:ro
     restart: unless-stopped

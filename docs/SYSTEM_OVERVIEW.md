@@ -173,11 +173,13 @@ flowchart LR
         Django[Django + DRF API]
         Worker[run_worker: background jobs]
         DB[(PostgreSQL)]
+        Redis[(Redis: shared cache)]
     end
     Site --> Nginx
     Portal --> Nginx
     Nginx --> Django
     Django --> DB
+    Django --> Redis
     Worker --> DB
     Django -. enqueue .-> DB
     Worker --> Paystack & Flutterwave & Termii & Channex & SMTP[Email]
@@ -191,6 +193,7 @@ flowchart LR
 - **Frontend:** React 18 + TypeScript, built with Vite, TanStack Query for server state, React Router. One app serves the public site, booking engine and staff portal; staff pages are code-split so guests never download them.
 - **Background jobs:** Django's task framework (`django.tasks`) with a database-backed queue in the `jobs` app. No Redis or message broker. In development and tests, tasks run immediately.
 - **Deployment:** Docker images, nginx in front, `docker-compose.yml` and CI in `.github/workflows/ci.yml`. See [DEPLOYMENT.md](DEPLOYMENT.md).
+- **Scaling:** Redis is the shared cache (rate limits, the sign-in grace window, cached room-type pages); PostgreSQL connections are pooled per process; gunicorn runs threaded workers (`deploy/gunicorn.conf.py`); nginx compresses responses, keeps connections to the API open and rate-limits each address. Sign-in is by token and all state is in PostgreSQL and Redis, so more API containers can be added. `deploy/loadtest.py` measures capacity. Details in [DEPLOYMENT.md](DEPLOYMENT.md#scaling-for-traffic).
 
 The backend is organised as **one Django app per business area**. Inside each app, business rules live in `services.py` (or `lifecycle.py`, `allocation.py`, `pricing.py`…), never in views or serializers. Views validate input, check permissions, call a service and serialise the result.
 
@@ -409,6 +412,10 @@ All configuration comes from environment variables, read in `hotel/settings.py` 
 | `GUEST_RETENTION_DAYS`, `GUEST_ID_RETENTION_DAYS` | 6 years, 365 days | NDPA retention |
 | `FIELD_ENCRYPTION_KEYS` | (required) | Encryption keys for ID numbers and secrets. **Back them up**: data is unreadable without them. |
 | `THROTTLE_*` | see settings | Rate limits per endpoint group |
+| `CACHE_URL` | `locmemcache://` | Shared cache; `redis://…` in production (docker-compose sets it) |
+| `PUBLIC_CACHE_SECONDS` | 300 | How long cached room-type pages live when nothing changes (edits clear them at once) |
+| `DB_POOL`, `DB_POOL_MIN_SIZE`, `DB_POOL_MAX_SIZE` | True, 2, 10 | PostgreSQL connection pool per server process |
+| `GUNICORN_WORKERS`, `GUNICORN_THREADS`, `GUNICORN_TIMEOUT` | 2×CPUs+1 (≤9), 4, 60 | API server processes, threads each, request timeout |
 | `CACHE_URL` | in-memory | Cache for rate limits and the refresh grace window. Set a shared cache (Redis, or `dbcache://`) when running several worker processes |
 
 Tax rates, exchange rates, rate plans, room prices and menus are **data**, edited in the staff portal under Settings.
