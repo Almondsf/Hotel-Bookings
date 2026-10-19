@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: docker-compose file is valid
-        run: POSTGRES_PASSWORD=ci docker compose config --quiet
+        run: touch .env && POSTGRES_PASSWORD=ci docker compose config --quiet  # .env is never committed
       - name: nginx config is valid
         run: >
           docker run --rm --add-host api:127.0.0.1
